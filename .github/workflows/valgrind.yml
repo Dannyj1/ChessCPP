@@ -21,7 +21,7 @@ jobs:
       - name: Setup Clang
         uses: KyleMayes/install-llvm-action@v2
         with:
-          version: "17"
+          version: "18"
           arch: "x64"
 
       - name: Install valgrind
@@ -36,7 +36,7 @@ jobs:
 
       - name: Run Valgrind
         run: |
-          valgrind --error-exitcode=1 --errors-for-leak-kinds=definite,indirect,possible --show-leak-kinds=definite,indirect,possible --leak-check=full --show-reachable=no ./Zagreus fastbench
+          valgrind --error-exitcode=1 --errors-for-leak-kinds=definite,indirect,possible --show-leak-kinds=definite,indirect,possible --leak-check=full --show-reachable=no ./Zagreus bench fast
 
       - name: Delete CMake cache
         run: rm -rf CMakeFiles CMakeCache.txt cmake_install.cmake Makefile
@@ -51,4 +51,4 @@ jobs:
 
       - name: Run w/ sanitizers
         run: |
-          ./Zagreus fastbench
+          ./Zagreus bench fast

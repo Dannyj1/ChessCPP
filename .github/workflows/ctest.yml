@@ -21,12 +21,12 @@ jobs:
       - name: Setup Clang
         uses: KyleMayes/install-llvm-action@v2
         with:
-          version: "17"
+          version: "18"
           arch: "x64"
 
       - name: Configure CMake & Build
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DAPPEND_VERSION=OFF -DENABLE_WARNINGS=ON -DENABLE_SANITIZER=OFF -DENABLE_TESTS=ON .
+          cmake -DCMAKE_BUILD_TYPE=Debug -DAPPEND_VERSION=OFF -DENABLE_WARNINGS=ON -DENABLE_SANITIZER=OFF -DENABLE_TESTS=ON .
           cmake --build . --target all
 
       - name: Run CTest

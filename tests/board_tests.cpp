@@ -1,4 +1,3 @@
-
 /*
  This file is part of Zagreus.
 
@@ -19,17 +18,12 @@
  along with Zagreus.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#pragma once
-#ifdef ZAGREUS_TUNER
-#include <string>
+#include <catch2/catch_test_macros.hpp>
+
+#include "../src/types.h"
 
 namespace Zagreus {
-struct TunePosition {
-    std::string fen = "";
-    double result = 0.0;
-    int evalScore = 0;
-};
+TEST_CASE("test_SEE", "[board], [see]") {
 
-void startTuning(std::string filePath);
 }
-#endif
+} // namespace Zagreus

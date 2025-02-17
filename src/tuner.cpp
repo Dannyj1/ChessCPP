@@ -1,61 +1,32 @@
-/*
- This file is part of Zagreus.
-
- Zagreus is a UCI chess engine
- Copyright (C) 2023-2024  Danny Jelsma
-
- Zagreus is free software: you can redistribute it and/or modify
- it under the terms of the GNU Affero General Public License as published
- by the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- Zagreus is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU Affero General Public License for more details.
-
- You should have received a copy of the GNU Affero General Public License
- along with Zagreus.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-#include "tuner.h"
-
-#include <algorithm>
-#include <cmath>
+#ifdef ZAGREUS_TUNER
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <vector>
+#include <cmath>
+#include <ranges>
 
-#include "../senjo/UCIAdapter.h"
-#include "bitboard.h"
-#include "evaluate.h"
-#include "features.h"
-#include "pst.h"
-#include "search.h"
+#include "board.h"
+#include "eval.h"
+#include "uci.h"
+#include "tuner.h"
 
 namespace Zagreus {
-int epochs = 10;
-float K = 0.0;
+const int epochs = 100;
+const int batchSize = 16;
+const double learningRate = 0.01;
+const int earlyStoppingPatience = 10;
+int seed = 42;
 
-int batchSize = 256;
-float learningRate = 0.1;
-float delta = 1.0;
-float optimizerEpsilon = 1e-6;
-float beta1 = 0.9;
-float beta2 = 0.999;
-// 0 = random seed
-long seed = 0;
+double K = 1.0;
 
-Bitboard tunerBoard{};
-
-std::vector<std::vector<TunePosition>> createBatches(std::vector<TunePosition>& positions) {
-    // Create random batches of batchSize positions
+std::vector<std::vector<TunePosition>> createBatches(const std::vector<TunePosition>& positions) {
     std::vector<std::vector<TunePosition>> batches;
-    batches.reserve(positions.size() / batchSize);
+    batches.reserve((positions.size() + batchSize - 1) / batchSize);
 
-    for (int i = 0; i < positions.size(); i += batchSize) {
+    for (size_t i = 0; i < positions.size(); i += batchSize) {
         std::vector<TunePosition> batch;
-        for (int j = i; j < i + batchSize && j < positions.size(); j++) {
+        for (size_t j = i; j < std::min(i + batchSize, positions.size()); j++) {
             batch.push_back(positions[j]);
         }
         batches.push_back(batch);
@@ -64,68 +35,7 @@ std::vector<std::vector<TunePosition>> createBatches(std::vector<TunePosition>& 
     return batches;
 }
 
-float sigmoid(float x) {
-    return 1.0f / (1.0f + pow(10.0f, -K * x / 400.0f));
-}
-
-float evaluationLoss(std::vector<TunePosition>& positions) {
-    float totalLoss = 0.0f;
-
-    for (TunePosition& pos : positions) {
-        tunerBoard.setFromFenTuner(pos.fen);
-        int evalScore = Evaluation(tunerBoard).evaluate();
-
-        // All scores are from white's perspective
-        if (tunerBoard.getMovingColor() == BLACK) {
-            evalScore *= -1;
-        }
-
-        float loss = std::pow(pos.result - sigmoid(evalScore), 2.0f);
-        totalLoss += loss;
-    }
-
-    return (1.0f / static_cast<float>(positions.size())) * totalLoss;
-}
-
-float findOptimalK(std::vector<TunePosition>& positions) {
-    const float phi = (1.0f + sqrt(5.0f)) / 2.0f;
-    const float tolerance = 1e-6f;
-
-    float a = 0.0f;
-    float b = 2.0f;
-
-    float x1 = b - (b - a) / phi;
-    float x2 = a + (b - a) / phi;
-
-    K = x1;
-    float f1 = evaluationLoss(positions);
-    K = x2;
-    float f2 = evaluationLoss(positions);
-
-    while (std::abs(b - a) > tolerance) {
-        if (f1 < f2) {
-            b = x2;
-            x2 = x1;
-            x1 = b - (b - a) / phi;
-            f2 = f1;
-            K = x1;
-            f1 = evaluationLoss(positions);
-        } else {
-            a = x1;
-            x1 = x2;
-            x2 = a + (b - a) / phi;
-            f1 = f2;
-            K = x2;
-            f2 = evaluationLoss(positions);
-        }
-    }
-
-    return (a + b) / 2.0f;
-}
-
-std::vector<TunePosition> loadPositions(
-    char* filePath, std::chrono::time_point<std::chrono::steady_clock>& maxEndTime,
-    std::mt19937_64 gen) {
+std::vector<TunePosition> loadPositions(const std::string& filePath, std::mt19937_64& gen, Board& board) {
     std::cout << "Loading positions..." << std::endl;
     std::vector<TunePosition> positions;
     std::vector<std::string> lines;
@@ -146,18 +56,21 @@ std::vector<TunePosition> loadPositions(
             continue;
         }
 
-        float result;
-        std::string resultStr = posLine.substr(posLine.find(" c9 ") + 4, posLine.find(" c9 ") + 4);
-        std::string fen = posLine.substr(0, posLine.find(" c9 "));
+        double result;
+        size_t c9_pos = posLine.find(" c9 ");
+        if (c9_pos == std::string::npos) continue;
 
-        if (!tunerBoard.setFromFen(fen) || tunerBoard.isDraw() || tunerBoard.isWinner<WHITE>()
-            || tunerBoard.isWinner<BLACK>()) {
+        std::string resultStr = posLine.substr(c9_pos + 4);
+        std::string fen = posLine.substr(0, c9_pos);
+
+        if (!board.setFromFEN(fen) || board.isDraw() ||
+            board.isKingInCheck<WHITE>() || board.isKingInCheck<BLACK>()) {
             continue;
         }
 
-        // Remove " and ; from result
         std::erase(resultStr, '"');
         std::erase(resultStr, ';');
+        std::erase(resultStr, ' ');
 
         if (resultStr == "1" || resultStr == "1-0") {
             result = 1.0;
@@ -170,10 +83,10 @@ std::vector<TunePosition> loadPositions(
             draw++;
         }
 
-        int evalScore = Evaluation(tunerBoard).evaluate();
+        Evaluation eval{board};
+        int evalScore = eval.evaluate();
 
-        // All scores are from white's perspective
-        if (tunerBoard.getMovingColor() == BLACK) {
+        if (board.getSideToMove() == BLACK) {
             evalScore *= -1;
         }
 
@@ -182,14 +95,13 @@ std::vector<TunePosition> loadPositions(
     }
 
     // Reduce the biggest two classes to the size of the smallest class
-    int smallestClassSize = std::min(win, std::min(loss, draw));
+    int smallestClassSize = std::min({win, loss, draw});
     std::vector<TunePosition> newPositions;
     int newWin = 0;
     int newLoss = 0;
     int newDraw = 0;
 
-    // Shuffle positions
-    std::shuffle(positions.begin(), positions.end(), gen);
+    std::ranges::shuffle(positions, gen);
 
     for (TunePosition& pos : positions) {
         if (pos.result == 1.0 && newWin < smallestClassSize) {
@@ -212,189 +124,146 @@ std::vector<TunePosition> loadPositions(
     // Write all newPositions to a file by their fen strings
     std::ofstream fout("cleaned_positions.epd");
     for (TunePosition& pos : newPositions) {
-        std::string result;
+        std::string resultStr;
 
         if (pos.result == 1.0) {
-            result = "1-0";
+            resultStr = "1-0";
         } else if (pos.result == 0.0) {
-            result = "0-1";
+            resultStr = "0-1";
         } else {
-            result = "1/2-1/2";
+            resultStr = "1/2-1/2";
         }
 
-        fout << pos.fen << " c9 \"" << result << "\";" << std::endl;
+        fout << pos.fen << " c9 \"" << resultStr << "\";" << std::endl;
     }
 
     fout.close();
 
     std::cout << "Loaded " << newPositions.size() << " positions." << std::endl;
     std::cout << "Win: " << newWin << ", Loss: " << newLoss << ", Draw: " << newDraw << std::endl;
-    return positions;
+    return newPositions;
 }
 
-void exportNewEvalValues(std::vector<float>& bestParams, int epoch, float validationLoss) {
-    std::ofstream fout("tuned_params_epoch_" + std::to_string(epoch) + ".txt");
+double sigmoid(const double x) {
+    return 1.0 / (1.0 + std::pow(10.0, -K * x / 400.0));
+}
 
-    fout << "Epoch: " << epoch << ", Val Loss: " << validationLoss << std::endl << std::endl;
+double sigmoidDerivative(const double x) {
+    const double s = sigmoid(x);
+    return (K * std::log(10.0) / 400.0) * s * (1.0 - s);
+}
 
-    // Declare pieceNames
-    std::string pieceNames[6] = {"Pawn", "Knight", "Bishop", "Rook", "Queen", "King"};
+double loss(const double prediction, const double target) {
+    return 0.5 * std::pow(prediction - target, 2);
+}
 
-    fout << "int evalValues[" << getEvalFeatureSize() << "] = { ";
-    for (int i = 0; i < getEvalFeatureSize(); i++) {
-        fout << static_cast<int>(bestParams[i]);
+double lossDerivative(const double prediction, const double target) {
+    return prediction - target;
+}
 
-        if (i != bestParams.size() - 1) {
-            fout << ", ";
+double findOptimalK(const std::vector<TunePosition>& positions) {
+    const double invphi = (std::sqrt(5.0)-1)/2;
+    const double invphi2 = (3 - std::sqrt(5.0))/2;
+    double a = -2.0;
+    double b = 2.0;
+    constexpr double tol = 1e-4;
+
+    auto averageLoss = [&positions](const double candidateK) -> double {
+        double totalLoss = 0.0;
+        const double oldK = K;
+        K = candidateK;
+        for (const auto& pos : positions) {
+            const double prediction = sigmoid(pos.evalScore);
+
+            totalLoss += loss(prediction, pos.result);
+        }
+        K = oldK;
+        return totalLoss / static_cast<double>(positions.size());
+    };
+
+    double x1 = a + invphi2 * (b - a);
+    double x2 = a + invphi * (b - a);
+    double f1 = averageLoss(x1);
+    double f2 = averageLoss(x2);
+
+    double startingLoss = averageLoss(K);
+    std::cout << "Starting loss: " << startingLoss << std::endl;
+
+    while (b - a > tol) {
+        if (f1 < f2) {
+            // Minimum lies in [a, x2].
+            b = x2;
+            x2 = x1;
+            f2 = f1;
+            x1 = a + invphi2 * (b - a);
+            f1 = averageLoss(x1);
+        } else {
+            // Minimum lies in [x1, b].
+            a = x1;
+            x1 = x2;
+            f1 = f2;
+            x2 = a + invphi * (b - a);
+            f2 = averageLoss(x2);
         }
     }
-    fout << " };" << std::endl << std::endl;
 
-    // Write the 6 piece square tables to a file (2 tables per piece, a midgame and endgame table
-    // declared like this:  int midgamePawnTable[64] and int endgamePawnTable[64] The 6 midgame tables
-    // are declared first, then the 6 endgame tables
-    int pstSize = getMidgameValues().size();
-    for (int i = 0; i < 6; i++) {
-        fout << "int midgame" << pieceNames[i] << "Table[64] = { ";
-        for (int j = 0; j < 64; j++) {
-            fout << static_cast<int>(bestParams[getEvalFeatureSize() + i * 64 + j]);
+    const double optimalK = (a + b) / 2.0;
+    const double bestLoss = std::min(f1, f2);
+    std::cout << "Best loss (K=" << optimalK << "): " << bestLoss << std::endl;
+    return optimalK;
+}
 
-            if (j != 63) {
-                fout << ", ";
-            }
-        }
-        fout << " };" << std::endl;
+void gradientDescent(std::vector<TunePosition>& trainingSet, const std::vector<TunePosition>& validationSet, const std::vector<TunePosition>& testSet,
+    std::mt19937_64& gen, Board& board) {
+    std::vector<double> weights{};
 
-        fout << "int endgame" << pieceNames[i] << "Table[64] = { ";
-        for (int j = 0; j < 64; j++) {
-            fout << static_cast<int>(bestParams[getEvalFeatureSize() + pstSize + i * 64 + j]);
+    std::vector<double> bestWeights = weights;
+    int epochsWithoutImprovement = 0;
+    double bestValidationLoss = std::numeric_limits<double>::infinity();
 
-            if (j != 63) {
-                fout << ", ";
-            }
-        }
-        fout << " };" << std::endl << std::endl;
+    for (int epoch = 0; epoch < epochs; epoch++) {
+
     }
 }
 
-void startTuning(char* filePath) {
-    std::random_device rd;
-    std::mt19937_64 gen; // NOLINT(*-msc51-cpp)
-
+void startTuning(std::string filePath) {
     if (seed == 0) {
+        std::random_device rd;
         seed = rd();
     }
 
-    gen = std::mt19937_64(seed);
-    std::cout << "Using seed: " << seed << std::endl;
+    std::mt19937_64 gen = std::mt19937_64(seed);
+    Engine engine{};
+    // Make sure all values are initialized.
+    engine.registerOptions();
+    engine.doSetup();
 
-    ZagreusEngine engine;
-    senjo::UCIAdapter adapter(engine);
-    auto maxEndTime = std::chrono::time_point<std::chrono::steady_clock>::max();
-    std::vector<TunePosition> positions = loadPositions(filePath, maxEndTime, gen);
+    Board board{};
+    std::vector<TunePosition> trainingSet = loadPositions(filePath, gen, board);
+    if (trainingSet.empty()) {
+        std::cout << "Error: No training positions loaded. Tuning cannot start." << std::endl;
+        return;
+    }
 
-    engine.setTuning(false);
+    std::vector<TunePosition> validationSet;
+    std::vector<TunePosition> testSet;
 
-    std::vector<float> bestParameters = getBaseEvalValues();
-    updateEvalValues(bestParameters);
+    const int64_t validationSetSize = trainingSet.size() * 0.1;
+    const int64_t testSetSize = trainingSet.size() * 0.1;
+
+    validationSet.assign(trainingSet.begin(), trainingSet.begin() + validationSetSize);
+    testSet.assign(trainingSet.begin() + validationSetSize, trainingSet.begin() + validationSetSize + testSetSize);
+    trainingSet.erase(trainingSet.begin(), trainingSet.begin() + validationSetSize + testSetSize);
+
+    std::cout << "Training set size: " << trainingSet.size() << std::endl;
+    std::cout << "Validation set size: " << validationSet.size() << std::endl;
+    std::cout << "Test set size: " << testSet.size() << std::endl;
 
     std::cout << "Finding the optimal K value..." << std::endl;
-    K = findOptimalK(positions);
+    K = findOptimalK(trainingSet);
     std::cout << "Optimal K value: " << K << std::endl;
 
-    std::shuffle(positions.begin(), positions.end(), gen);
-
-    std::vector<TunePosition> validationPositions(positions.begin() + positions.size() * 0.9,
-                                                  positions.end());
-    positions.erase(positions.begin() + positions.size() * 0.9, positions.end());
-    exportNewEvalValues(bestParameters, 0, evaluationLoss(positions));
-
-    std::cout << "Starting tuning..." << std::endl;
-    std::vector<float> m(bestParameters.size(), 0.0);
-    std::vector<float> v(bestParameters.size(), 0.0);
-
-    std::cout << "Calculating the initial loss..." << std::endl;
-    float bestLoss = evaluationLoss(validationPositions);
-
-    std::cout << "Initial loss: " << bestLoss << std::endl;
-    std::cout << "Finding the best parameters. This may take a while..." << std::endl;
-    std::vector<std::vector<TunePosition>> batches = createBatches(positions);
-    int epoch = 1;
-    int iteration = 0;
-
-    while (epoch <= epochs) {
-        std::shuffle(positions.begin(), positions.end(), gen);
-        batches = createBatches(positions);
-        int totalIterations = batches.size();
-        std::vector<float> gradients(bestParameters.size(), 0.0f);
-        float beta1Corrected = 0;
-        float beta2Corrected = 0;
-
-        for (std::vector<TunePosition>& batch : batches) {
-            iteration++;
-
-            if (iteration == 1) {
-                beta1Corrected = beta1;
-                beta2Corrected = beta2;
-            } else {
-                beta1Corrected *= beta1;
-                beta2Corrected *= beta2;
-            }
-
-            int percentDone = static_cast<int>(
-                ((iteration % batches.size()) / static_cast<float>(totalIterations)) * 100);
-            std::cout << "Epoch: " << epoch << ", Iteration: " << (iteration % batches.size() + 1)
-                << "/" <<
-                totalIterations << " (" << percentDone << "%)" << std::endl;
-            std::ranges::fill(gradients, 0.0f);
-
-            for (int paramIndex = 0; paramIndex < bestParameters.size(); paramIndex++) {
-                float oldParam = bestParameters[paramIndex];
-
-                bestParameters[paramIndex] = oldParam + delta;
-                updateEvalValues(bestParameters);
-                float fPlusDelta = evaluationLoss(batch);
-
-                bestParameters[paramIndex] = oldParam - delta;
-                updateEvalValues(bestParameters);
-                float fMinusDelta = evaluationLoss(batch);
-
-                bestParameters[paramIndex] = oldParam + 2 * delta;
-                updateEvalValues(bestParameters);
-                float fPlus2Delta = evaluationLoss(batch);
-
-                bestParameters[paramIndex] = oldParam - 2 * delta;
-                updateEvalValues(bestParameters);
-                float fMinus2Delta = evaluationLoss(batch);
-
-                gradients[paramIndex] += (
-                    -fPlus2Delta + 8.0f * fPlusDelta - 8.0f * fMinusDelta + fMinus2Delta) / (
-                    12.0f * delta);
-
-                // reset
-                bestParameters[paramIndex] = oldParam;
-            }
-
-            for (int paramIndex = 0; paramIndex < bestParameters.size(); paramIndex++) {
-                m[paramIndex] = beta1 * m[paramIndex] + (1.0f - beta1) * gradients[paramIndex];
-                v[paramIndex] = beta2 * v[paramIndex] + (1.0f - beta2) * std::pow(
-                                    gradients[paramIndex], 2.0f);
-                float mCorrected = m[paramIndex] / (1.0f - beta1Corrected);
-                float vCorrected = v[paramIndex] / (1.0f - beta2Corrected);
-                bestParameters[paramIndex] -= learningRate * mCorrected / (
-                    sqrt(vCorrected) + optimizerEpsilon);
-            }
-        }
-
-        updateEvalValues(bestParameters);
-        float validationLoss = evaluationLoss(validationPositions);
-
-        exportNewEvalValues(bestParameters, epoch, validationLoss);
-
-        std::cout << "======== Epoch " << epoch << " Done ========" << std::endl;
-        std::cout << "Epoch: " << epoch << ", Val Loss: " << validationLoss << std::endl;
-        std::cout << "==============================" << std::endl;
-        epoch++;
-    }
+    gradientDescent(trainingSet, validationSet, testSet, gen, board);
 }
-} // namespace Zagreus
+}
+#endif

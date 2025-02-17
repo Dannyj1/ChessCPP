@@ -20,18 +20,18 @@
 # along with Zagreus.  If not, see <https://www.gnu.org/licenses/>.
 
 cmake_minimum_required(VERSION 3.25)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 project(Zagreus)
-set(ZAGREUS_VERSION_MAJOR "5")
+set(ZAGREUS_VERSION_MAJOR "6")
 set(ZAGREUS_VERSION_MINOR "0")
 
 # Default values
 set(BUILD_FLAGS "")
 
 # Define the different profiles and their corresponding flags
-set(DEBUG_FLAGS "-static-libgcc -static-libstdc++ -fno-omit-frame-pointer -pthread -gdwarf-4 -g -Wno-unused-command-line-argument")
-set(PROFILING_FLAGS "-static-libgcc -static-libstdc++ -pthread -g -Wno-unused-command-line-argument")
-set(RELEASE_FLAGS "-static-libgcc -static-libstdc++ -pthread -Wno-unused-command-line-argument")
+set(DEBUG_FLAGS "-static-libgcc -static-libstdc++ -fno-omit-frame-pointer -pthread -gdwarf-4 -g -Wno-unused-command-line-argument -std=c++23")
+set(PROFILING_FLAGS "-static-libgcc -static-libstdc++ -pthread -g -Wno-unused-command-line-argument -std=c++23")
+set(RELEASE_FLAGS "-static-libgcc -static-libstdc++ -pthread -Wno-unused-command-line-argument -std=c++23")
 
 if (WIN32)
     # Add the --pdb flag for Windows
@@ -54,6 +54,8 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     option(APPEND_VERSION_USE_GIT "Append version or branch to filename using git, when off it always uses just the version" ON)
     option(ENABLE_CLANG_TIDY "Enable the use of clang-tidy (slows down compiling a lot)" OFF)
     option(ENABLE_TESTS "Enable the compilation and execution of tests" ON)
+    option(ENABLE_IWYU "Enable the use of Include What You Use (IWYU)" ON)
+    option(ENABLE_TUNER "Enable compilation of the tuner" OFF)
 else ()
     option(ENABLE_OPTIMIZATION "Enable optimization flags (-O3)" ON)
     option(ENABLE_OPTIMIZATION_FAST_MATH "Enable fast math optimization flags (-Ofast)" ON)
@@ -68,6 +70,8 @@ else ()
     option(APPEND_VERSION_USE_GIT "Append version or branch to filename using git, when off it always uses just the version" ON)
     option(ENABLE_CLANG_TIDY "Enable the use of clang-tidy (slows down compiling a lot)" OFF)
     option(ENABLE_TESTS "Enable the compilation and execution of tests" OFF)
+    option(ENABLE_IWYU "Enable the use of Include What You Use (IWYU)" OFF)
+    option(ENABLE_TUNER "Enable compilation of the tuner" OFF)
 endif ()
 
 if (ENABLE_TESTS)
@@ -103,6 +107,8 @@ message("APPEND_VERSION: ${APPEND_VERSION}")
 message("APPEND_VERSION_USE_GIT: ${APPEND_VERSION_USE_GIT}")
 message("ENABLE_CLANG_TIDY: ${ENABLE_CLANG_TIDY}")
 message("ENABLE_TESTS: ${ENABLE_TESTS}")
+message("ENABLE_IWYU: ${ENABLE_IWYU}")
+message("ENABLE_TUNER: ${ENABLE_TUNER}")
 
 if (APPEND_VERSION)
     execute_process(COMMAND git rev-parse --abbrev-ref HEAD
@@ -143,9 +149,9 @@ if (ENABLE_OPTIMIZATION)
         set(PROFILING_FLAGS "${PROFILING_FLAGS} -O3")
     endif ()
 else ()
-    set(RELEASE_FLAGS "${RELEASE_FLAGS} -O1 -fno-inline")
-    set(DEBUG_FLAGS "${DEBUG_FLAGS} -O1 -fno-inline")
-    set(PROFILING_FLAGS "${PROFILING_FLAGS} -O1 -fno-inline")
+    set(RELEASE_FLAGS "${RELEASE_FLAGS} -O0 -fno-inline")
+    set(DEBUG_FLAGS "${DEBUG_FLAGS} -O0 -fno-inline")
+    set(PROFILING_FLAGS "${PROFILING_FLAGS} -O0 -fno-inline")
 endif ()
 
 if (ENABLE_LTO)
@@ -200,12 +206,27 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${BUILD_FLAGS}")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${BUILD_FLAGS}")
 
 file(GLOB inc_zagreus "src/*.h" "src/*.cpp")
-file(GLOB inc_senjo "senjo/*.h" "senjo/*.cpp")
 
-add_executable(Zagreus src/main.cpp ${inc_senjo} ${inc_zagreus})
+add_executable(Zagreus src/main.cpp ${inc_zagreus})
 
 target_compile_definitions(Zagreus PRIVATE ZAGREUS_VERSION_MAJOR="${ZAGREUS_VERSION_MAJOR}")
 target_compile_definitions(Zagreus PRIVATE ZAGREUS_VERSION_MINOR="${ZAGREUS_VERSION_MINOR}")
+
+if (ENABLE_IWYU)
+    find_program(IWYU_PATH NAMES "include-what-you-use")
+
+    if (IWYU_PATH)
+        set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "${IWYU_PATH}")
+        set_property(TARGET Zagreus PROPERTY CXX_INCLUDE_WHAT_YOU_USE "${IWYU_PATH};-Xiwyu;--error;-Xiwyu;--no_comments;-Xiwyu;--cxx17ns;-Xiwyu;--no_fwd_decls")
+        message(STATUS "IWYU found and enabled: ${IWYU_PATH}")
+    else ()
+        message(WARNING "IWYU requested but not found. Please install IWYU or disable ENABLE_IWYU.")
+    endif ()
+endif ()
+
+if (ENABLE_TUNER)
+    add_compile_definitions(ZAGREUS_TUNER)
+endif ()
 
 if (ENABLE_TESTS)
     file(GLOB tests_folder "tests/*.h" "tests/*.cpp")
@@ -213,7 +234,7 @@ if (ENABLE_TESTS)
     # Remove main from inc_zagreus
     list(REMOVE_ITEM inc_zagreus "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
-    add_executable(zagreus-tests ${tests_folder} ${inc_senjo} ${inc_zagreus})
+    add_executable(zagreus-tests ${tests_folder} ${inc_zagreus})
     target_link_libraries(zagreus-tests PRIVATE Catch2::Catch2WithMain)
 
     target_compile_definitions(zagreus-tests PRIVATE ZAGREUS_VERSION_MAJOR="${ZAGREUS_VERSION_MAJOR}")

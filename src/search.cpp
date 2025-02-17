@@ -2,7 +2,7 @@
  This file is part of Zagreus.
 
  Zagreus is a UCI chess engine
- Copyright (C) 2023  Danny Jelsma
+ Copyright (C) 2023-2025  Danny Jelsma
 
  Zagreus is free software: you can redistribute it and/or modify
  it under the terms of the GNU Affero General Public License as published
@@ -19,520 +19,460 @@
  */
 
 #include "search.h"
-
 #include <cmath>
-
-#include "../senjo/Output.h"
-#include "evaluate.h"
-#include "features.h"
-#include "movegen.h"
-#include "movelist_pool.h"
-#include "movepicker.h"
-#include "timemanager.h"
+#include <cstring>
+#include <string>
+#include "board.h"
+#include "constants.h"
+#include "eval.h"
+#include "move.h"
+#include "move_gen.h"
+#include "move_picker.h"
+#include "timeman.h"
 #include "tt.h"
+#include "types.h"
+#include "uci.h"
 
 namespace Zagreus {
-TranspositionTable* tt = TranspositionTable::getTT();
-static int lmrReductions[MAX_PLY][MAX_MOVES]{};
+static TranspositionTable* tt = TranspositionTable::getTT();
+static int lmrTable[MAX_PLIES][MAX_MOVES]{};
 
 void initializeSearch() {
-    for (int depth = 0; depth < MAX_PLY; depth++) {
-        for (int movesPlayed = 0; movesPlayed < MAX_MOVES; movesPlayed++) {
-            // Formula from ethereal: https://github.com/AndyGrant/Ethereal/blob/a7a7a8ed69cbbb4e9a3b02fc5d3d0d9facfa1526/src/search.c#L155C13-L155C21
-            // Will probably tune the constants using SPSA at some point
-            lmrReductions[depth][movesPlayed] = static_cast<int>(0.78 + std::log(depth) * log(movesPlayed) / 2.47);
+    for (int depth = 1; depth < MAX_PLIES; ++depth) {
+        for (int moveCount = 1; moveCount < MAX_MOVES; ++moveCount) {
+            lmrTable[depth][moveCount] = static_cast<int>(0.5 + 0.5 * std::log(depth) * std::log(moveCount));
         }
     }
 }
 
+
+// TODO: Support more search variables (infinite, max nodes, etc.)
 template <PieceColor color>
-Move getBestMove(senjo::GoParams params, ZagreusEngine& engine, Bitboard& board,
-                 senjo::SearchStats& searchStats) {
-    MoveListPool* moveListPool = MoveListPool::getInstance();
-    auto startTime = std::chrono::steady_clock::now();
-    SearchContext searchContext{};
-    searchContext.startTime = startTime;
-    int depth = 0;
-    int bestScore = MAX_NEGATIVE;
-    Line bestPvLine{};
-    Line pvLine{};
-    pvLine.startPly = board.getPly();
+Move search(Engine& engine, Board& board, SearchParams& params, SearchStats& stats) {
+    int depth = 1;
+    const int currentPly = board.getPly();
+    int searchTime = calculateSearchTime<color>(params);
+    const auto endTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(searchTime);
+    const auto startTime = std::chrono::steady_clock::now();
+    PvLine bestPvLine = PvLine{board.getPly()};
 
-    tt->ageHistoryTable();
+    engine.setSearchStopped(false);
 
-    while (!engine.stopRequested()) {
-        // Update the endtime using new data
-        searchContext.endTime = getEndTime(searchContext, params, engine, board.getMovingColor());
-
-        auto currentTime = std::chrono::steady_clock::now();
-        if (currentTime > searchContext.endTime) {
-            engine.stopSearching();
-            break;
+    while (!engine.isSearchStopped() && (currentPly + depth) < MAX_PLIES) {
+        if (params.blackTime > 0 || params.whiteTime > 0) {
+            // Don't start the next iteration if we are 10% away from the end time
+            if (std::chrono::steady_clock::now() + std::chrono::milliseconds(searchTime / 10) > endTime) {
+                engine.setSearchStopped(true);
+                break;
+            }
         }
 
-        depth += 1;
-        searchStats.depth = depth;
-        searchStats.seldepth = 0;
-
-        if (board.getPly() + depth >= MAX_PLY + 1) {
-            break;
-        }
-
-        // If the go command has a max depth argument, terminate when reaching the desired depth.
         if (params.depth > 0 && depth > params.depth) {
-            return pvLine.moves[0];
-        }
-
-        int score = search<color, ROOT>(board, MAX_NEGATIVE, MAX_POSITIVE, depth, searchContext,
-                                        searchStats, pvLine);
-
-        currentTime = std::chrono::steady_clock::now();
-        if (currentTime > searchContext.endTime) {
-            engine.stopSearching();
+            engine.setSearchStopped(true);
             break;
         }
 
-        Move bestMove = pvLine.moves[0];
-        Move previousBestMove = board.getPvLine().moves[0];
+        PvLine pvLine = PvLine{board.getPly()};
 
-        // If bestScore is positive and iterationScore is 0 or negative or vice versa, set suddenScoreSwing to true
-        if (depth > 1 && ((bestScore > 0 && score < 0) || (bestScore < 0 && score > 0))) {
-            searchContext.suddenScoreSwing = true;
+        const int score = pvSearch<color, ROOT>(engine, board, INITIAL_ALPHA, INITIAL_BETA, depth, stats, endTime,
+                                                pvLine);
+        assert(score != INITIAL_ALPHA && score != INITIAL_BETA);
+        assert(depth > 0);
+
+        if (std::chrono::steady_clock::now() > endTime) {
+            engine.setSearchStopped(true);
+            break;
         }
 
-        // If the iterationScore suddenly dropped by 150 or more from bestScore, set suddenScoreDrop to true
-        if (depth > 1 && score - bestScore <= -150) {
-            searchContext.suddenScoreDrop = true;
-        }
-
-        // If bestMove changes, increment context.pvChanges
-        if (depth > 1 && (bestMove.from != previousBestMove.from || bestMove.to != previousBestMove.
-                          to)) {
-            searchContext.pvChanges += 1;
-        }
-
-        if (score > bestScore) {
-            bestScore = score;
+        if (engine.isSearchStopped()) {
+            break;
         }
 
         bestPvLine = pvLine;
-        board.setPvLine(bestPvLine);
-        searchStats.score = score;
-        printPv(searchStats, startTime, bestPvLine);
-    }
+        board.setPreviousPvLine(bestPvLine);
 
-    engine.stopSearching();
-    Move bestMove = bestPvLine.moves[0];
-    MoveList* legalMoves = moveListPool->getMoveList();
-    generateMoves<color, NORMAL>(board, legalMoves);
+        stats.score = score;
+        stats.timeSpentMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime).count();
+        stats.depth = depth;
 
-    // Check if bestMove is a legal move (sometimes in endgames that drag on for long time, the PV is empty)
-    for (int i = 0; i < legalMoves->size; i++) {
-        if (legalMoves->moves[i].from == bestMove.from && legalMoves->moves[i].to == bestMove.to) {
-            moveListPool->releaseMoveList(legalMoves);
-            return bestMove;
+        // Make sure we don't divide by zero
+        if (stats.timeSpentMs == 0) {
+            stats.timeSpentMs = 1;
         }
+
+        const uint64_t totalNodesSearch = stats.nodesSearched + stats.qNodesSearched;
+        const uint64_t nps = static_cast<double>(totalNodesSearch) / (
+                                 static_cast<double>(stats.timeSpentMs) / 1000.0);
+        std::string pvString = parsePvLine(bestPvLine);
+        engine.sendInfoMessage("depth " + std::to_string(stats.depth) + " score cp " + std::to_string(stats.score) +
+                               " nodes " + std::to_string(totalNodesSearch) + " time " +
+                               std::to_string(stats.timeSpentMs) + " nps " + std::to_string(nps) + " pv " + pvString);
+        depth += 1;
     }
 
-    return legalMoves->moves[0];
+    if (bestPvLine.moves[0] == NO_MOVE) {
+        // Find the first legal move and play that
+        MoveList moves = MoveList{};
+        generateMoves<color, ALL>(board, moves);
+        MovePicker movePicker{moves};
+        Move move;
+        Move bestMove = NO_MOVE;
+
+        while (movePicker.next(move)) {
+            board.makeMove(move);
+
+            if (!board.isPositionLegal<color>()) {
+                board.unmakeMove();
+                continue;
+            }
+
+            bestMove = move;
+            board.unmakeMove();
+            break;
+        }
+
+        assert(bestMove != NO_MOVE);
+        return bestMove;
+    }
+
+    assert(bestPvLine.moves[0] != NO_MOVE);
+    board.setPreviousPvLine(bestPvLine);
+    return bestPvLine.moves[0];
 }
 
-template Move getBestMove<WHITE>(senjo::GoParams params, ZagreusEngine& engine, Bitboard& board,
-                                 senjo::SearchStats& searchStats);
-template Move getBestMove<BLACK>(senjo::GoParams params, ZagreusEngine& engine, Bitboard& board,
-                                 senjo::SearchStats& searchStats);
+template Move search<WHITE>(Engine& engine, Board& board, SearchParams& params, SearchStats& stats);
+template Move search<BLACK>(Engine& engine, Board& board, SearchParams& params, SearchStats& stats);
 
 template <PieceColor color, NodeType nodeType>
-int search(Bitboard& board, int alpha, int beta, int16_t depth,
-           SearchContext& context,
-           senjo::SearchStats& searchStats, Line& pvLine) {
-    constexpr bool IS_PV_NODE = nodeType == PV || nodeType == ROOT;
-    constexpr bool IS_ROOT_NODE = nodeType == ROOT;
-    constexpr PieceColor OPPOSITE_COLOR = color == WHITE ? BLACK : WHITE;
+int pvSearch(Engine& engine, Board& board, int alpha, int beta, int depth, SearchStats& stats,
+             const std::chrono::time_point<std::chrono::steady_clock>& endTime, PvLine& pvLine) {
+    constexpr bool isPV = nodeType == PV || nodeType == ROOT;
+    constexpr bool isRoot = nodeType == ROOT;
+    constexpr PieceColor opponentColor = !color;
 
-    if (board.isDraw()) {
-        return DRAW_SCORE;
-    }
-
-    auto currentTime = std::chrono::steady_clock::now();
-    if (!IS_ROOT_NODE && (currentTime > context.endTime || board.getPly() >= MAX_PLY)) {
-        pvLine.moveCount = 0;
+    if (!isRoot && (stats.nodesSearched + stats.qNodesSearched) % 4096 == 0 && std::chrono::steady_clock::now() >
+        endTime) {
+        engine.setSearchStopped(true);
         return beta;
     }
 
-    searchStats.nodes += 1;
+    bool isInCheck = board.isKingInCheck<color>();
 
-    bool ownKingInCheck = board.isKingInCheck<color>();
-    if (ownKingInCheck) {
-        int see = board.seeOpponent<OPPOSITE_COLOR>(board.getPreviousMove().to);
-
-        if (see >= NO_CAPTURE_SCORE) {
-            depth += 1;
-        }
+    if (isInCheck) {
+        depth += 1;
     }
 
     if (depth <= 0) {
+        assert(!isRoot);
         pvLine.moveCount = 0;
-        return qsearch<color, nodeType>(board, alpha, beta, depth, context, searchStats);
+        return qSearch<color, nodeType>(engine, board, alpha, beta, depth, stats, endTime);
     }
 
-    if (!IS_PV_NODE && board.getHalfMoveClock() < 80) {
-        int ttScore = tt->getScore(board.getZobristHash(), depth, alpha,
-                                   beta, board.getPly());
+    stats.nodesSearched += 1;
 
-        if (ttScore != INT32_MIN) {
-            return ttScore;
+    if (!isPV) {
+        // Check for a transposition table hit
+        const int16_t score = tt->probePosition(board.getZobristHash(), depth, alpha, beta, board.getPly());
+
+        if (score != NO_TT_SCORE) {
+            return score;
         }
-    }
 
-    constexpr bool isPreviousMoveNull = nodeType == NULL_MOVE;
-
-    // Null move pruning
-    if (!IS_PV_NODE && depth >= 3 && !isPreviousMoveNull && board.
-        getAmountOfMinorOrMajorPieces<
-            color>() > 0) {
-        if (!ownKingInCheck && Evaluation(board).evaluate() >= beta) {
-            int r = 3 + (depth >= 6) + (depth >= 12);
-
-            Line nullLine{};
-            SearchContext nullContext{};
-            nullContext.startTime = context.startTime;
-            nullContext.endTime = context.endTime;
+        // Null Move Pruning
+        if (depth >= 3 && !isInCheck && board.hasNonPawnMaterial<color>() && !board.getPreviousMove() == NO_MOVE) {
             board.makeNullMove();
-            int nullScore = -search<OPPOSITE_COLOR, NULL_MOVE>(board, -beta, -beta + 1, depth - r,
-                                                               nullContext, searchStats, nullLine);
+            const int R = 2 + depth / 3;
+            PvLine nmpPvLine = PvLine{board.getPly()};
+            const int nullMoveScore = -pvSearch<opponentColor, REGULAR>(engine, board, -beta, -beta + 1, depth - R,
+                                                                        stats, endTime, nmpPvLine);
             board.unmakeNullMove();
-            int mateScores = MATE_SCORE - MAX_PLY;
 
-            if (nullScore >= beta && nullScore < mateScores) {
-                return nullScore;
+            if (nullMoveScore >= beta) {
+                return nullMoveScore;
             }
         }
     }
 
-    bool doPvSearch = true;
-    MoveListPool* moveListPool = MoveListPool::getInstance();
-    MoveList* moves = moveListPool->getMoveList();
+    bool firstMove = true;
+    int legalMoves = 0;
 
-    if (ownKingInCheck) {
+    Move move;
+    MoveList moves = MoveList{};
+
+    if (isInCheck) {
         generateMoves<color, EVASIONS>(board, moves);
     } else {
-        generateMoves<color, NORMAL>(board, moves);
+        generateMoves<color, ALL>(board, moves);
     }
 
-    auto movePicker = MovePicker(moves);
-    int legalMoveCount = 0;
-    Line nodeLine{};
-    nodeLine.startPly = board.getPly();
-    int bestScore = MAX_NEGATIVE;
-    Move bestMove = {NO_SQUARE, NO_SQUARE};
+    MoveList searchedQuietMoves{};
+    MovePicker movePicker{moves};
+    movePicker.score(board);
+    PvLine nodePvLine = PvLine{board.getPly()};
+    Move bestMove = NO_MOVE;
+    int bestScore = INT32_MIN;
+    int movesSearched = 0;
 
-    while (movePicker.hasNext()) {
-        Move move = movePicker.getNextMove();
+    while (movePicker.next(move)) {
+        const Square toSquare = getToSquare(move);
+        const Piece capturedPiece = board.getPieceOnSquare(toSquare);
+
         board.makeMove(move);
 
-        if (board.isKingInCheck<color>()) {
-            board.unmakeMove(move);
+        if (!board.isPositionLegal<color>()) {
+            board.unmakeMove();
             continue;
         }
 
-        legalMoveCount += 1;
+        legalMoves += 1;
 
-        int score = 0;
-        bool didLmr = false;
-        bool shouldFullSearch = false;
+        if (capturedPiece == EMPTY) {
+            searchedQuietMoves.moves[searchedQuietMoves.size++] = move;
+        }
 
-        // Late Move Reduction (LMR, not in Root nodes)
-        if (!IS_ROOT_NODE && depth >= 3 && move.captureScore == NO_CAPTURE_SCORE && move.
-            promotionPiece == EMPTY && legalMoveCount > 1) {
-            int R = std::max(0, lmrReductions[depth][legalMoveCount]);
+        bool doFullSearch = true;
+        int score = INT32_MIN;
 
-            // Increase reduction for non-PV nodes
-            R += !IS_PV_NODE;
 
-            // Decrease reduction when in check
-            R -= ownKingInCheck;
+        // Late Move Reduction
+        if (movesSearched > 1 && depth >= 3 && !(isPV && capturedPiece != EMPTY) && !(
+                isPV && getMoveType(move) == PROMOTION)) {
+            doFullSearch = false;
+            int R = 0;
+            const Square opponentKingSquare = bitboardToSquare(
+                board.getPieceBoard<color == WHITE ? BLACK_KING : WHITE_KING>());
+            const uint64_t opponentKingAttackers = board.getSquareAttackersByColor<color>(opponentKingSquare);
 
-            // Decrease reduction for killer moves
-            uint64_t moveCode = encodeMove(&move);
-            if (tt->killerMoves[0][board.getPly()] == moveCode
-                || tt->killerMoves[1][board.getPly()] == moveCode
-                || tt->killerMoves[2][board.getPly()] == moveCode) {
-                R -= 1;
+            R = lmrTable[depth][movesSearched];
+            R -= isPV;
+            R -= isInCheck;
+            R -= opponentKingAttackers != 0;
+
+            // Make sure depth - 1 - R is at least 1
+            if (depth - 1 - R <= 0) {
+                R = depth - 2;
             }
 
-            // Decrease for counter moves
-            if (tt->counterMoves[move.piece][move.to] == moveCode) {
-                R -= 1;
-            }
+            R = std::max(0, R);
 
-            // Don't drop into qsearch
-            R = std::min(depth - 1, std::max(1, R));
+            score = -pvSearch<opponentColor, REGULAR>(engine, board, -alpha - 1, -alpha, depth - 1 - R, stats,
+                                                      endTime, nodePvLine);
 
-            // Depth - 1 (R = 1) is the "default" search, so skip LMR
-            if (R > 1) {
-                score = -search<OPPOSITE_COLOR, NO_PV>(
-                    board, -alpha - 1, -alpha, depth - R, context, searchStats, nodeLine);
-
-                didLmr = true;
-
-                if (score > alpha) {
-                    shouldFullSearch = true;
-                }
+            if (score > alpha) {
+                doFullSearch = true;
             }
         }
 
-        if (!didLmr || shouldFullSearch) {
-            if (IS_PV_NODE && doPvSearch) {
-                score = -search<OPPOSITE_COLOR, PV>(board, -beta, -alpha, depth - 1,
-                                                    context,
-                                                    searchStats, nodeLine);
+        if (doFullSearch) {
+            if (firstMove) {
+                if (isRoot) {
+                    score = -pvSearch<opponentColor, PV>(engine, board, -beta, -alpha, depth - 1, stats, endTime,
+                                                         nodePvLine);
+                } else {
+                    score = -pvSearch<opponentColor, nodeType>(engine, board, -beta, -alpha, depth - 1, stats, endTime,
+                                                               nodePvLine);
+                }
+
+                firstMove = false;
             } else {
-                score = -search<OPPOSITE_COLOR, NO_PV>(board, -alpha - 1, -alpha,
-                                                       depth - 1, context,
-                                                       searchStats, nodeLine);
+                score = -pvSearch<opponentColor, REGULAR>(engine, board, -alpha - 1, -alpha, depth - 1, stats, endTime,
+                                                          nodePvLine);
 
-                if (score > alpha && score < beta) {
-                    score = -search<OPPOSITE_COLOR, PV>(board, -beta, -alpha,
-                                                        depth - 1, context,
-                                                        searchStats, nodeLine);
+                if (isPV && score > alpha) {
+                    score = -pvSearch<opponentColor, PV>(engine, board, -beta, -alpha, depth - 1, stats, endTime,
+                                                         nodePvLine);
                 }
             }
         }
 
-        board.unmakeMove(move);
+        board.unmakeMove();
+
+        if (score >= beta) {
+            if (!engine.isSearchStopped()) {
+                if (capturedPiece == EMPTY) {
+                    const int historyValue = 300 * depth - 250;
+
+                    tt->updateHistory<color>(move, historyValue);
+
+                    for (int i = 0; i < searchedQuietMoves.size; ++i) {
+                        const Move quietMove = searchedQuietMoves.moves[i];
+
+                        if (quietMove != move) {
+                            tt->updateHistory<color>(quietMove, -historyValue);
+                        }
+                    }
+                }
+
+                if (!isRoot) {
+                    tt->savePosition(board.getZobristHash(), depth, board.getPly(), score, bestMove, BETA);
+                }
+            }
+
+            return score;
+        }
 
         if (score > bestScore) {
             bestScore = score;
 
             if (score > alpha) {
                 bestMove = move;
-
-                if (score >= beta) {
-                    if (move.captureScore == NO_CAPTURE_SCORE && move.promotionPiece == EMPTY) {
-                        uint64_t moveCode = encodeMove(&move);
-                        tt->killerMoves[2][board.getPly()] = tt->killerMoves[1][board.getPly()];
-                        tt->killerMoves[1][board.getPly()] = tt->killerMoves[0][board.getPly()];
-                        tt->killerMoves[0][board.getPly()] = moveCode;
-                        tt->historyMoves[move.piece][move.to] += depth * depth;
-
-                        if (!isPreviousMoveNull) {
-                            tt->counterMoves[board.getPreviousMove().piece][board.getPreviousMove().
-                                to] = moveCode;
-                        }
-                    }
-
-                    moveListPool->releaseMoveList(moves);
-                    if (!IS_ROOT_NODE) {
-                        uint32_t bestMoveCode = encodeMove(&bestMove);
-                        tt->addPosition(board.getZobristHash(), depth, score, FAIL_HIGH_NODE,
-                                        bestMoveCode, board.getPly(), context);
-                    }
-                    return score;
-                }
-
                 alpha = score;
-                doPvSearch = false;
-
                 pvLine.moves[0] = move;
-                std::memcpy(pvLine.moves + 1, nodeLine.moves, nodeLine.moveCount * sizeof(Move));
-                pvLine.moveCount = nodeLine.moveCount + 1;
+                std::memcpy(pvLine.moves + 1, nodePvLine.moves, nodePvLine.moveCount * sizeof(Move));
+                pvLine.moveCount = nodePvLine.moveCount + 1;
             }
         }
+
+        movesSearched += 1;
     }
 
-    moveListPool->releaseMoveList(moves);
-
-    if (!legalMoveCount) {
-        if (ownKingInCheck) {
+    if (!legalMoves) {
+        if (isInCheck) {
             alpha = -MATE_SCORE + board.getPly();
+            bestScore = alpha;
         } else {
             alpha = DRAW_SCORE;
+            bestScore = DRAW_SCORE;
+        }
+    } else {
+        if (!isRoot && board.isDraw()) {
+            alpha = DRAW_SCORE;
+            bestScore = DRAW_SCORE;
         }
     }
 
-    TTNodeType ttNodeType = FAIL_LOW_NODE;
+    if (!isRoot) {
+        TTNodeType ttNodeType = ALPHA;
 
-    if (IS_PV_NODE && (bestMove.from != NO_SQUARE && bestMove.to != NO_SQUARE)) {
-        ttNodeType = EXACT_NODE;
+        if (isPV) {
+            ttNodeType = EXACT;
+        }
+
+        if (!engine.isSearchStopped()) {
+            tt->savePosition(board.getZobristHash(), depth, board.getPly(), bestScore, bestMove, ttNodeType);
+        }
     }
 
-    if (!IS_ROOT_NODE) {
-        uint32_t bestMoveCode = encodeMove(&bestMove);
-        tt->addPosition(board.getZobristHash(), depth, alpha, ttNodeType, board.getPly(),
-                        bestMoveCode, context);
-    }
-
-    return alpha;
+    assert(bestScore != INITIAL_ALPHA);
+    return bestScore;
 }
 
 template <PieceColor color, NodeType nodeType>
-int qsearch(Bitboard& board, int alpha, int beta, int16_t depth,
-            SearchContext& context,
-            senjo::SearchStats& searchStats) {
-    constexpr PieceColor OPPOSITE_COLOR = color == WHITE ? BLACK : WHITE;
-    constexpr TTNodeType IS_PV_NODE = nodeType == PV ? EXACT_NODE : FAIL_LOW_NODE;
+int qSearch(Engine& engine, Board& board, int alpha, int beta, int depth, SearchStats& stats,
+            const std::chrono::time_point<std::chrono::steady_clock>& endTime) {
+    assert(nodeType != ROOT);
+    constexpr bool isPV = nodeType == PV;
 
-    if (board.isDraw()) {
-        return DRAW_SCORE;
-    }
-
-    auto currentTime = std::chrono::steady_clock::now();
-    if (currentTime > context.endTime || board.getPly() >= MAX_PLY) {
+    if ((stats.nodesSearched + stats.qNodesSearched) % 4096 == 0 && std::chrono::steady_clock::now() > endTime) {
+        engine.setSearchStopped(true);
         return beta;
     }
 
-    if (!IS_PV_NODE && board.getHalfMoveClock() < 80) {
-        int ttScore = TranspositionTable::getTT()->getScore(board.getZobristHash(), depth, alpha,
-                                                            beta, board.getPly());
+    if (!isPV) {
+        const int16_t score = tt->probePosition(board.getZobristHash(), depth, alpha, beta, board.getPly());
 
-        if (ttScore != INT32_MIN) {
-            return ttScore;
+        if (score != NO_TT_SCORE) {
+            return score;
         }
     }
 
-    searchStats.qnodes += 1;
+    stats.qNodesSearched += 1;
 
-    bool inCheck = board.isKingInCheck<color>();
-    Move previousMove = board.getPreviousMove();
+    const bool isInCheck = board.isKingInCheck<color>();
+    int bestScore = Evaluation(board).evaluate();
 
-    if (!inCheck) {
-        int standPat = Evaluation(board).evaluate();
-
-        if (standPat >= beta) {
-            tt->addPosition(board.getZobristHash(), depth, standPat, FAIL_HIGH_NODE, 0,
-                            board.getPly(), context);
-            return standPat;
-        }
-
-        if (board.getAmountOfMinorOrMajorPieces<color>() >= 2 && board.getAmountOfMinorOrMajorPieces
-            <OPPOSITE_COLOR>() >= 2 && board.getAmountOfPawns<color>() > 0 && board.getAmountOfPawns
-            <OPPOSITE_COLOR>() > 0) {
-            int queenDelta = std::max(getEvalValue(ENDGAME_QUEEN_MATERIAL),
-                                      getEvalValue(MIDGAME_QUEEN_MATERIAL));
-            int minPawnValue = std::min(getEvalValue(ENDGAME_PAWN_MATERIAL),
-                                        getEvalValue(MIDGAME_PAWN_MATERIAL));
-
-            if (previousMove.promotionPiece != EMPTY) {
-                queenDelta += getPieceWeight(previousMove.promotionPiece) - minPawnValue;
+    if (!isInCheck) {
+        // Stand pat
+        if (bestScore >= beta) {
+            if (!engine.isSearchStopped()) {
+                tt->savePosition(board.getZobristHash(), depth, board.getPly(), bestScore, NO_MOVE, BETA);
             }
 
-            if (standPat < alpha - queenDelta) {
-                return alpha;
-            }
+            return bestScore;
         }
 
-        if (alpha < standPat) {
-            alpha = standPat;
+        if (bestScore > alpha) {
+            alpha = bestScore;
         }
     }
 
-    MoveListPool* moveListPool = MoveListPool::getInstance();
-    MoveList* moves = moveListPool->getMoveList();
+    int legalMoves = 0;
+    Move move;
+    MoveList moves = MoveList{};
+    Move bestMove = NO_MOVE;
 
-    if (inCheck) {
+    if (isInCheck) {
         generateMoves<color, EVASIONS>(board, moves);
     } else {
         generateMoves<color, QSEARCH>(board, moves);
     }
 
-    auto movePicker = MovePicker(moves);
-    int legalMoveCount = 0;
-    previousMove = {};
-    int bestScore = MAX_NEGATIVE;
-    Move bestMove = {NO_SQUARE, NO_SQUARE};
+    MovePicker movePicker{moves};
+    movePicker.score(board);
 
-    while (movePicker.hasNext()) {
-        Move move = movePicker.getNextMove();
+    while (movePicker.next(move)) {
+        const Square toSquare = getToSquare(move);
+        const Piece capturedPiece = board.getPieceOnSquare(toSquare);
 
-        if (!inCheck && move.captureScore < NO_CAPTURE_SCORE) {
-            continue;
+        if (!isInCheck && capturedPiece != EMPTY) {
+            const bool see = board.see(move, 0);
+
+            if (!see) {
+                continue;
+            }
         }
 
         board.makeMove(move);
 
-        if (board.isKingInCheck<color>()) {
-            board.unmakeMove(move);
+        if (!board.isPositionLegal<color>()) {
+            board.unmakeMove();
             continue;
         }
 
-        legalMoveCount += 1;
+        legalMoves += 1;
 
-        int score = -qsearch<OPPOSITE_COLOR, nodeType>(board, -beta, -alpha, depth - 1, context,
-                                                       searchStats);
-        board.unmakeMove(move);
+        const int score = -qSearch<!color, nodeType>(engine, board, -beta, -alpha, depth - 1, stats, endTime);
+
+        board.unmakeMove();
+
+        if (score >= beta) {
+            if (!engine.isSearchStopped()) {
+                tt->savePosition(board.getZobristHash(), depth, board.getPly(), score, bestMove, BETA);
+            }
+
+            return score;
+        }
 
         if (score > bestScore) {
             bestScore = score;
 
             if (score > alpha) {
                 bestMove = move;
-
-                if (score >= beta) {
-                    moveListPool->releaseMoveList(moves);
-                    uint32_t bestMoveCode = encodeMove(&bestMove);
-                    tt->addPosition(board.getZobristHash(), depth, score, FAIL_HIGH_NODE,
-                                    bestMoveCode, board.getPly(), context);
-                    return beta;
-                }
-
                 alpha = score;
             }
         }
     }
 
-    moveListPool->releaseMoveList(moves);
-
-    if (legalMoveCount == 0 && inCheck) {
-        return -MATE_SCORE + board.getPly();
-    }
-
-    TTNodeType ttNodeType = FAIL_LOW_NODE;
-
-    if (IS_PV_NODE && (bestMove.from != NO_SQUARE && bestMove.to != NO_SQUARE)) {
-        ttNodeType = EXACT_NODE;
-    }
-
-    uint32_t bestMoveCode = encodeMove(&bestMove);
-    tt->addPosition(board.getZobristHash(), depth, alpha, ttNodeType, bestMoveCode, board.getPly(),
-                    context);
-    return alpha;
-}
-
-template int qsearch<WHITE, PV>(Bitboard& board, int alpha, int beta,
-                                int16_t depth, SearchContext& context,
-                                senjo::SearchStats& searchStats);
-template int qsearch<BLACK, PV>(Bitboard& board, int alpha, int beta,
-                                int16_t depth, SearchContext& context,
-                                senjo::SearchStats& searchStats);
-
-void printPv(senjo::SearchStats& searchStats, std::chrono::steady_clock::time_point& startTime,
-             Line& pvLine) {
-    searchStats.pv = "";
-    for (int i = 0; i < pvLine.moveCount; i++) {
-        Move move = pvLine.moves[i];
-        searchStats.pv += getNotation(move.from) + getNotation(move.to);
-
-        if (move.promotionPiece != EMPTY) {
-            if (move.promotionPiece == WHITE_QUEEN || move.promotionPiece == BLACK_QUEEN) {
-                searchStats.pv += "q";
-            } else if (move.promotionPiece == WHITE_ROOK || move.promotionPiece == BLACK_ROOK) {
-                searchStats.pv += "r";
-            } else if (move.promotionPiece == WHITE_BISHOP || move.promotionPiece == BLACK_BISHOP) {
-                searchStats.pv += "b";
-            } else if (move.promotionPiece == WHITE_KNIGHT || move.promotionPiece == BLACK_KNIGHT) {
-                searchStats.pv += "n";
-            }
-        }
-
-        if (i != pvLine.moveCount - 1) {
-            searchStats.pv += " ";
+    if (!legalMoves && isInCheck) {
+        bestScore = -MATE_SCORE + board.getPly();
+    } else {
+        if (board.isDraw()) {
+            bestScore = DRAW_SCORE;
         }
     }
 
-    searchStats.msecs =
-        duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime)
-        .count();
-    senjo::Output(senjo::Output::NoPrefix) << searchStats;
+    TTNodeType ttNodeType = ALPHA;
+
+    if (isPV) {
+        ttNodeType = EXACT;
+    }
+
+    if (!engine.isSearchStopped()) {
+        tt->savePosition(board.getZobristHash(), depth, board.getPly(), bestScore, bestMove, ttNodeType);
+    }
+
+    assert(bestScore != INITIAL_ALPHA);
+    return bestScore;
 }
 } // namespace Zagreus

@@ -1,4 +1,3 @@
-
 /*
  This file is part of Zagreus.
 
@@ -20,16 +19,13 @@
  */
 
 #pragma once
-#ifdef ZAGREUS_TUNER
-#include <string>
+#include <vector>
+
+#include "constants.h"
+#include "pst.h"
 
 namespace Zagreus {
-struct TunePosition {
-    std::string fen = "";
-    double result = 0.0;
-    int evalScore = 0;
-};
+extern int evalMaterialValues[GAME_PHASES][PIECE_TYPES];
 
-void startTuning(std::string filePath);
-}
-#endif
+extern int evalMobility[GAME_PHASES][PIECE_TYPES];
+} // namespace Zagreus

@@ -2,7 +2,7 @@
  This file is part of Zagreus.
 
  Zagreus is a chess engine that supports the UCI protocol
- Copyright (C) 2023  Danny Jelsma
+ Copyright (C) 2023-2025  Danny Jelsma
 
  Zagreus is free software: you can redistribute it and/or modify
  it under the terms of the GNU Affero General Public License as published
@@ -19,10 +19,11 @@
  */
 
 #include "magics.h"
-
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <random>
 
 // Code for magic generation https://www.chessprogramming.org/Looking_for_Magics

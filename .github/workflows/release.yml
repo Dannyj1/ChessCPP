@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-latest
             build-name: Linux
             artifact-extension: .tar.gz
             config-command: cmake -DCMAKE_BUILD_TYPE=Release -DAPPEND_VERSION_USE_GIT=OFF .
@@ -39,9 +39,9 @@ jobs:
 
       - name: Setup Clang (Linux)
         if: runner.os == 'Linux'
-        uses: KyleMayes/install-llvm-action@v1
+        uses: KyleMayes/install-llvm-action@v2
         with:
-          version: "17"
+          version: "18"
 
       - name: Setup msys and install required packages
         if: runner.os == 'Windows'
@@ -74,12 +74,6 @@ jobs:
           mkdir rel
           cp "$executable_name" rel/
           cp LICENSE README.md rel/
-          mkdir "rel/source-code"
-          cp -r src "rel/source-code"
-          cp -r senjo "rel/source-code"
-          cp LICENSE "rel/source-code"
-          cp README.md "rel/source-code"
-          cp CMakeLists.txt "rel/source-code"
           cd rel
           ${{ matrix.archive-command }} "../$executable_name${{ matrix.artifact-extension }}" *
 
@@ -91,13 +85,13 @@ jobs:
 
   create-release:
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-  
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:

@@ -1,4 +1,3 @@
-
 /*
  This file is part of Zagreus.
 
@@ -19,17 +18,28 @@
  along with Zagreus.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#pragma once
-#ifdef ZAGREUS_TUNER
-#include <string>
+#include "timeman.h"
+#include <algorithm>
+#include <limits>
 
 namespace Zagreus {
-struct TunePosition {
-    std::string fen = "";
-    double result = 0.0;
-    int evalScore = 0;
-};
+template <PieceColor color>
+int calculateSearchTime(SearchParams& params) {
+    int timeLeft = color == WHITE ? params.whiteTime : params.blackTime;
+    int timeInc = color == WHITE ? params.whiteInc : params.blackInc;
 
-void startTuning(std::string filePath);
+    if (timeLeft > 0) {
+        int movesToGo = 50;
+        int searchTime = timeLeft + (timeInc * movesToGo);
+
+        searchTime /= movesToGo;
+        return std::max<int>(searchTime, 1);
+    } else {
+        return std::numeric_limits<int>::max();
+    }
 }
-#endif
+
+template int calculateSearchTime<WHITE>(SearchParams& params);
+template int calculateSearchTime<BLACK>(SearchParams& params);
+
+} // namespace Zagreus

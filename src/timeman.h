@@ -1,4 +1,3 @@
-
 /*
  This file is part of Zagreus.
 
@@ -20,16 +19,10 @@
  */
 
 #pragma once
-#ifdef ZAGREUS_TUNER
-#include <string>
+#include "search.h"
+#include "types.h"
 
 namespace Zagreus {
-struct TunePosition {
-    std::string fen = "";
-    double result = 0.0;
-    int evalScore = 0;
-};
-
-void startTuning(std::string filePath);
-}
-#endif
+template <PieceColor color>
+int calculateSearchTime(SearchParams& params);
+} // namespace Zagreus

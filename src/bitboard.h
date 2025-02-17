@@ -1,438 +1,466 @@
 /*
  This file is part of Zagreus.
-
+ 
  Zagreus is a UCI chess engine
- Copyright (C) 2023  Danny Jelsma
-
+ Copyright (C) 2023-2025  Danny Jelsma
+ 
  Zagreus is free software: you can redistribute it and/or modify
  it under the terms of the GNU Affero General Public License as published
  by the Free Software Foundation, either version 3 of the License, or
  (at your option) any later version.
-
+ 
  Zagreus is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  GNU Affero General Public License for more details.
-
+ 
  You should have received a copy of the GNU Affero General Public License
  along with Zagreus.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-enum-enum-conversion"
 #pragma once
-
-#include <x86intrin.h>
 
 #include <cassert>
 #include <cstdint>
-#include <string>
 
 #include "bitwise.h"
-#include "movelist_pool.h"
+#include "constants.h"
 #include "types.h"
-#include "utils.h"
 
 namespace Zagreus {
-class Bitboard {
-private:
-    uint64_t pieceBB[12]{};
-    PieceType pieceSquareMapping[64]{};
-    uint64_t colorBB[2]{};
-    uint64_t occupiedBB{0ULL};
 
-    PieceColor movingColor = NONE;
-    uint16_t ply = 0;
-    uint8_t halfMoveClock = 0;
-    uint8_t fullmoveClock = 1;
-    int8_t enPassantSquare = NO_SQUARE;
-    uint8_t castlingRights = 0b00001111;
+/**
+ * \brief Initializes the attack lookup tables for pawns, knights, and kings.
+ */
+void initializeAttackLookupTables();
 
-    uint64_t zobristHash = 0ULL;
+/**
+ * \brief Initializes the between lookup table.
+ */
+void initializeBetweenLookupTable();
 
-    UndoData undoStack[MAX_PLY]{};
-    uint64_t moveHistory[MAX_PLY]{};
-    Line pvLine{};
+/**
+ * \brief Shifts the bitboard north by one rank.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftNorth(const uint64_t bb) {
+    return bb << 8;
+}
 
-    int pstValues[4]{};
+/**
+ * \brief Shifts the bitboard south by one rank.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftSouth(const uint64_t bb) {
+    return bb >> 8;
+}
 
-    Move previousMove{};
-    int materialCount[12]{};
+/**
+ * \brief Shifts the bitboard east by one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftEast(const uint64_t bb) {
+    return (bb << 1) & NOT_A_FILE;
+}
 
-public:
-    uint64_t getPieceBoard(PieceType pieceType);
+/**
+ * \brief Shifts the bitboard west by one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftWest(const uint64_t bb) {
+    return (bb >> 1) & NOT_H_FILE;
+}
 
-    template <PieceColor color>
-    uint64_t getColorBoard() {
-        return colorBB[color];
+/**
+ * \brief Shifts the bitboard north-east by one rank and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftNorthEast(const uint64_t bb) {
+    return (bb << 9) & NOT_A_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard north-west by one rank and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftNorthWest(const uint64_t bb) {
+    return (bb << 7) & NOT_H_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard south-east by one rank and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftSouthEast(const uint64_t bb) {
+    return (bb >> 7) & NOT_A_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard south-west by one rank and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftSouthWest(const uint64_t bb) {
+    return (bb >> 9) & NOT_H_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard north-north-east by two ranks and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftNorthNorthEast(const uint64_t bb) {
+    return (bb << 17) & NOT_A_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard north-east-east by one rank and two files.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftNorthEastEast(const uint64_t bb) {
+    return (bb << 10) & NOT_AB_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard south-east-east by one rank and two files.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftSouthEastEast(const uint64_t bb) {
+    return (bb >> 6) & NOT_AB_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard south-south-east by two ranks and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftSouthSouthEast(const uint64_t bb) {
+    return (bb >> 15) & NOT_A_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard north-north-west by two ranks and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftNorthNorthWest(const uint64_t bb) {
+    return (bb << 15) & NOT_H_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard north-west-west by one rank and two files.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftNorthWestWest(const uint64_t bb) {
+    return (bb << 6) & NOT_GH_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard south-west-west by one rank and two files.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftSouthWestWest(const uint64_t bb) {
+    return (bb >> 10) & NOT_GH_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard south-south-west by two ranks and one file.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+inline uint64_t shiftSouthSouthWest(const uint64_t bb) {
+    return (bb >> 17) & NOT_H_FILE;
+}
+
+/**
+ * \brief Shifts the bitboard in the specified direction.
+ * \tparam direction The direction to shift.
+ * \param bb The bitboard to shift.
+ * \return The shifted bitboard.
+ */
+template <Direction direction>
+constexpr uint64_t shift(const uint64_t bb) {
+    switch (direction) {
+        case NORTH:
+            return shiftNorth(bb);
+        case SOUTH:
+            return shiftSouth(bb);
+        case EAST:
+            return shiftEast(bb);
+        case WEST:
+            return shiftWest(bb);
+        case NORTH_EAST:
+            return shiftNorthEast(bb);
+        case NORTH_WEST:
+            return shiftNorthWest(bb);
+        case SOUTH_EAST:
+            return shiftSouthEast(bb);
+        case SOUTH_WEST:
+            return shiftSouthWest(bb);
+        case NORTH_NORTH_EAST:
+            return shiftNorthNorthEast(bb);
+        case NORTH_EAST_EAST:
+            return shiftNorthEastEast(bb);
+        case SOUTH_EAST_EAST:
+            return shiftSouthEastEast(bb);
+        case SOUTH_SOUTH_EAST:
+            return shiftSouthSouthEast(bb);
+        case SOUTH_SOUTH_WEST:
+            return shiftSouthSouthWest(bb);
+        case SOUTH_WEST_WEST:
+            return shiftSouthWestWest(bb);
+        default:
+            assert(false);
+            return bb;
+    }
+}
+
+/**
+ * \brief Calculates the single push for white pawns.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the single push.
+ */
+inline uint64_t whitePawnSinglePush(const uint64_t bb, const uint64_t empty) {
+    return shiftNorth(bb) & empty;
+}
+
+/**
+ * \brief Calculates the double push for white pawns.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the double push.
+ */
+inline uint64_t whitePawnDoublePush(const uint64_t bb, const uint64_t empty) {
+    const uint64_t singlePush = whitePawnSinglePush(bb, empty);
+    return shiftNorth(singlePush) & empty & RANK_4;
+}
+
+/**
+ * \brief Calculates the west attacks for white pawns.
+ * \param bb The bitboard representing the pawns.
+ * \return The bitboard representing the west attacks.
+ */
+inline uint64_t whitePawnWestAttacks(const uint64_t bb) {
+    return shiftNorthWest(bb);
+}
+
+/**
+ * \brief Calculates the east attacks for white pawns.
+ * \param bb The bitboard representing the pawns.
+ * \return The bitboard representing the east attacks.
+ */
+inline uint64_t whitePawnEastAttacks(const uint64_t bb) {
+    return shiftNorthEast(bb);
+}
+
+/**
+ * \brief Calculates the attacks for white pawns.
+ * \param bb The bitboard representing the pawns.
+ * \return The bitboard representing the attacks.
+ */
+inline uint64_t calculateWhitePawnAttacks(const uint64_t bb) {
+    return whitePawnWestAttacks(bb) | whitePawnEastAttacks(bb);
+}
+
+/**
+ * \brief Calculates the pushable pawns for white.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the pushable pawns.
+ */
+inline uint64_t whitePushablePawns(const uint64_t bb, const uint64_t empty) {
+    return shiftSouth(empty) & bb;
+}
+
+/**
+ * \brief Calculates the double pushable pawns for white.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the double pushable pawns.
+ */
+inline uint64_t whiteDoublePushablePawns(const uint64_t bb, const uint64_t empty) {
+    const uint64_t emptyRank3 = shiftSouth(empty & RANK_4) & empty;
+    return whitePushablePawns(bb, emptyRank3);
+}
+
+/**
+ * \brief Calculates the single push for black pawns.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the single push.
+ */
+inline uint64_t blackPawnSinglePush(const uint64_t bb, const uint64_t empty) {
+    return shiftSouth(bb) & empty;
+}
+
+/**
+ * \brief Calculates the double push for black pawns.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the double push.
+ */
+inline uint64_t blackPawnDoublePush(const uint64_t bb, const uint64_t empty) {
+    const uint64_t singlePush = blackPawnSinglePush(bb, empty);
+    return shiftSouth(singlePush) & empty & RANK_5;
+}
+
+/**
+ * \brief Calculates the west attacks for black pawns.
+ * \param bb The bitboard representing the pawns.
+ * \return The bitboard representing the west attacks.
+ */
+inline uint64_t blackPawnWestAttacks(const uint64_t bb) {
+    return shiftSouthWest(bb);
+}
+
+/**
+ * \brief Calculates the east attacks for black pawns.
+ * \param bb The bitboard representing the pawns.
+ * \return The bitboard representing the east attacks.
+ */
+inline uint64_t blackPawnEastAttacks(const uint64_t bb) {
+    return shiftSouthEast(bb);
+}
+
+/**
+ * \brief Calculates the attacks for black pawns.
+ * \param bb The bitboard representing the pawns.
+ * \return The bitboard representing the attacks.
+ */
+inline uint64_t calculateBlackPawnAttacks(const uint64_t bb) {
+    return blackPawnWestAttacks(bb) | blackPawnEastAttacks(bb);
+}
+
+/**
+ * \brief Calculates the pushable pawns for black.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the pushable pawns.
+ */
+inline uint64_t blackPushablePawns(const uint64_t bb, const uint64_t empty) {
+    return shiftNorth(empty) & bb;
+}
+
+/**
+ * \brief Calculates the double pushable pawns for black.
+ * \param bb The bitboard representing the pawns.
+ * \param empty The bitboard representing the empty squares.
+ * \return The bitboard representing the double pushable pawns.
+ */
+inline uint64_t blackDoublePushablePawns(const uint64_t bb, const uint64_t empty) {
+    const uint64_t emptyRank6 = shiftNorth(empty & RANK_5) & empty;
+    return blackPushablePawns(bb, emptyRank6);
+}
+
+/**
+ * \brief Calculates the attacks for knights.
+ * \param bb The bitboard representing the knights.
+ * \return The bitboard representing the attacks.
+ */
+inline uint64_t calculateKnightAttacks(const uint64_t bb) {
+    return shiftNorthNorthEast(bb) | shiftNorthEastEast(bb) | shiftSouthEastEast(bb) |
+           shiftSouthSouthEast(bb) | shiftSouthSouthWest(bb) | shiftSouthWestWest(bb) |
+           shiftNorthWestWest(bb) | shiftNorthNorthWest(bb);
+}
+
+/**
+ * \brief Retrieves the pawn attacks for a given square and color.
+ * \tparam color The color of the pawn (WHITE or BLACK).
+ * \param square The square index (0-63).
+ * \return A bitboard representing the attack pattern.
+ */
+template <PieceColor color>
+uint64_t getPawnAttacks(uint8_t square);
+
+/**
+ * \brief Retrieves the knight attacks for a given square.
+ * \param square The square index (0-63).
+ * \return A bitboard representing the attack pattern.
+ */
+uint64_t getKnightAttacks(uint8_t square);
+
+/**
+ * \brief Retrieves the king attacks for a given square.
+ * \param square The square index (0-63).
+ * \return A bitboard representing the attack pattern.
+ */
+uint64_t getKingAttacks(uint8_t square);
+
+/**
+ * \brief Retrieves the bishop attacks for a given square and occupied squares.
+ * \param square The square index (0-63).
+ * \param occupied A bitboard representing the occupied squares.
+ * \return A bitboard representing the attack pattern.
+ */
+uint64_t getBishopAttacks(uint8_t square, uint64_t occupied);
+
+/**
+ * \brief Retrieves the rook attacks for a given square and occupied squares.
+ * \param square The square index (0-63).
+ * \param occupied A bitboard representing the occupied squares.
+ * \return A bitboard representing the attack pattern.
+ */
+uint64_t getRookAttacks(uint8_t square, uint64_t occupied);
+
+/**
+ * \brief Retrieves the queen attacks for a given square and occupied squares.
+ * \param square The square index (0-63).
+ * \param occupied A bitboard representing the occupied squares.
+ * \return A bitboard representing the attack pattern.
+ */
+uint64_t queenAttacks(uint8_t square, uint64_t occupied);
+
+/**
+ * \brief Calculates the attacks for kings.
+ * \param bb The bitboard representing the kings.
+ * \return The bitboard representing the attacks.
+ */
+inline uint64_t calculateKingAttacks(uint64_t bb) {
+    const uint64_t attacks = shiftEast(bb) | shiftWest(bb);
+    bb |= attacks;
+    return attacks | shiftNorth(bb) | shiftSouth(bb);
+}
+
+/**
+ * \brief Converts a square index to a bitboard.
+ * \param square The square index (0-63).
+ * \return The bitboard representing the square.
+ */
+inline uint64_t squareToBitboard(const uint8_t square) {
+    return 1ULL << square;
+}
+
+/**
+ * \brief Converts a bitboard to a square index.
+ * \param bb The bitboard to convert.
+ * \return The square index.
+ */
+inline Square bitboardToSquare(const uint64_t bb) {
+    if (bb == 0) {
+        return A1;
     }
 
-    template <PieceColor color>
-    uint64_t getPawnDoublePush(uint64_t pawns) {
-        const uint64_t singlePush = getPawnSinglePush<color>(pawns);
-
-        if (color == WHITE) {
-            return singlePush | (nortOne(singlePush) & getEmptyBoard() & RANK_4);
-        }
-
-        if (color == BLACK) {
-            return singlePush | (soutOne(singlePush) & getEmptyBoard() & RANK_5);
-        }
-
-        return 0;
-    }
-
-    template <PieceColor color>
-    uint64_t getPawnSinglePush(uint64_t pawns) {
-        if (color == WHITE) {
-            return nortOne(pawns) & getEmptyBoard();
-        }
-
-        if (color == BLACK) {
-            return soutOne(pawns) & getEmptyBoard();
-        }
-
-        return 0;
-    }
-
-    uint64_t getOccupiedBoard() const;
-
-    uint64_t getEmptyBoard() const;
-
-    PieceType getPieceOnSquare(int8_t square);
-
-    uint64_t getQueenAttacks(int8_t square);
-
-    uint64_t getQueenAttacks(int8_t square, uint64_t occupancy);
-
-    uint64_t getBishopAttacks(int8_t square);
-
-    static uint64_t getBishopAttacks(int8_t square, uint64_t occupancy);
-
-    uint64_t getRookAttacks(int8_t square);
-
-    static uint64_t getRookAttacks(int8_t square, uint64_t occupancy);
-
-    void setPiece(int8_t square, PieceType piece);
-
-    void removePiece(int8_t square, PieceType piece);
-
-    template <PieceType piece>
-    int getMaterialCount() {
-        return materialCount[piece];
-    }
-
-    void makeMove(Move& move);
-    int getHalfMoveClock();
-
-    void unmakeMove(Move& move);
-
-    void print();
-
-    void printAvailableMoves(MoveList* moves);
-
-    bool setFromFen(const std::string& fen);
-
-    bool setFromFenTuner(const std::string& fen);
-
-    bool isDraw();
-
-    template <PieceColor color>
-    bool isWinner();
-
-    void setPieceFromFENChar(char character, int index);
-
-    PieceColor getMovingColor() const;
-
-    void setMovingColor(PieceColor movingColor);
-
-    uint64_t getSquareAttacks(int8_t square);
-
-    template <PieceColor color>
-    uint64_t getSquareAttackersByColor(int8_t square) {
-        if (color == WHITE) {
-            uint64_t queenBB = getPieceBoard(WHITE_QUEEN);
-            uint64_t rookBB = getPieceBoard(WHITE_ROOK);
-            uint64_t bishopBB = getPieceBoard(WHITE_BISHOP);
-
-            uint64_t pawnAttacks = getPawnAttacks<BLACK>(square) & getPieceBoard(WHITE_PAWN);
-            uint64_t bishopAttacks = getBishopAttacks(square) & bishopBB;
-            uint64_t knightAttacks = getKnightAttacks(square) & getPieceBoard(WHITE_KNIGHT);
-            uint64_t kingAttacks = getKingAttacks(square) & getPieceBoard(WHITE_KING);
-            uint64_t rookAttacks = getRookAttacks(square) & rookBB;
-            uint64_t queenAttacks = getQueenAttacks(square) & queenBB;
-
-            return pawnAttacks | bishopAttacks | knightAttacks | rookAttacks | queenAttacks |
-                   kingAttacks;
-        } else {
-            uint64_t queenBB = getPieceBoard(BLACK_QUEEN);
-            uint64_t rookBB = getPieceBoard(BLACK_ROOK);
-            uint64_t bishopBB = getPieceBoard(BLACK_BISHOP);
-
-            uint64_t pawnAttacks = getPawnAttacks<WHITE>(square) & getPieceBoard(BLACK_PAWN);
-            uint64_t bishopAttacks = getBishopAttacks(square) & bishopBB;
-            uint64_t knightAttacks = getKnightAttacks(square) & getPieceBoard(BLACK_KNIGHT);
-            uint64_t rookAttacks = getRookAttacks(square) & rookBB;
-            uint64_t queenAttacks = getQueenAttacks(square) & queenBB;
-            uint64_t kingAttacks = getKingAttacks(square) & getPieceBoard(BLACK_KING);
-
-            return pawnAttacks | bishopAttacks | knightAttacks | rookAttacks | queenAttacks |
-                   kingAttacks;
-        }
-    }
-
-    template <PieceColor color>
-    bool isSquareAttackedByColor(int8_t square) {
-        return getSquareAttackersByColor<color>(square) != 0;
-    }
-
-    template <PieceColor color>
-    bool isKingInCheck() {
-        constexpr PieceColor OPPOSITE_COLOR = color == WHITE ? BLACK : WHITE;
-        uint64_t kingBB = getPieceBoard(color == WHITE ? WHITE_KING : BLACK_KING);
-        int8_t kingLocation = bitscanForward(kingBB);
-
-        return isSquareAttackedByColor<OPPOSITE_COLOR>(kingLocation);
-    }
-
-    int8_t getEnPassantSquare() const;
-
-    void setEnPassantSquare(int8_t enPassantSquare);
-
-    uint8_t getCastlingRights() const;
-
-    void setCastlingRights(uint8_t castlingRights);
-
-    bool isInsufficientMaterial();
-
-    uint64_t getZobristHash() const;
-
-    void setZobristHash(uint64_t zobristHash);
-
-    bool makeStrMove(const std::string& strMove);
-
-    Line getPvLine();
-
-    void setPvLine(Line& pvLine);
-
-    uint16_t getPly() const;
-
-    void setPly(uint16_t ply);
-
-    bool isOpenFile(int8_t square);
-
-    template <PieceColor color>
-    bool isSemiOpenFile(int8_t square) {
-        uint64_t fileMask = getFile(square);
-        if (color == WHITE) {
-            uint64_t ownOccupied = getPieceBoard(WHITE_PAWN);
-            uint64_t opponentOccupied = getPieceBoard(BLACK_PAWN);
-
-            return fileMask == (fileMask & ~ownOccupied) && fileMask != (
-                       fileMask & ~opponentOccupied);
-        } else {
-            uint64_t ownOccupied = getPieceBoard(BLACK_PAWN);
-            uint64_t opponentOccupied = getPieceBoard(WHITE_PAWN);
-
-            return fileMask == (fileMask & ~ownOccupied) && fileMask != (
-                       fileMask & ~opponentOccupied);
-        }
-    }
-
-    // Also returns true when it is an open file
-    template <PieceColor color>
-    bool isSemiOpenFileLenient(int8_t square) {
-        uint64_t fileMask = getFile(square);
-
-        if (color == WHITE) {
-            uint64_t ownOccupied = getPieceBoard(WHITE_PAWN);
-            return fileMask == (fileMask & ~ownOccupied);
-        } else {
-            uint64_t ownOccupied = getPieceBoard(BLACK_PAWN);
-            return fileMask == (fileMask & ~ownOccupied);
-        }
-    }
-
-    template <PieceColor attackingColor>
-    int seeCapture(int8_t fromSquare, int8_t toSquare) {
-        constexpr PieceColor OPPOSITE_COLOR = attackingColor == WHITE ? BLACK : WHITE;
-        PieceType movingPiece = pieceSquareMapping[fromSquare];
-        PieceType capturedPieceType = pieceSquareMapping[toSquare];
-        int captureScore = mvvlva(movingPiece, capturedPieceType);
-        Move move{fromSquare, toSquare, movingPiece, captureScore};
-
-        makeMove(move);
-        int score = getPieceWeight(capturedPieceType) - see<OPPOSITE_COLOR>(toSquare);
-        unmakeMove(move);
-
-        return score;
-    }
-
-    template <PieceColor attackingColor>
-    int8_t getSmallestAttackerSquare(int8_t square) {
-        uint64_t attacks = getSquareAttackersByColor<attackingColor>(square);
-        int8_t smallestAttackerSquare = NO_SQUARE;
-        int smallestAttackerWeight = 999999999;
-
-        while (attacks) {
-            int attackerSquare = popLsb(attacks);
-            PieceType pieceType = pieceSquareMapping[attackerSquare];
-            int weight = getPieceWeight(pieceType);
-
-            if (weight < smallestAttackerWeight) {
-                smallestAttackerWeight = weight;
-                smallestAttackerSquare = attackerSquare;
-            }
-        }
-
-        return smallestAttackerSquare;
-    }
-
-    template <PieceColor attackingColor>
-    int see(int8_t square) {
-        constexpr PieceColor OPPOSITE_COLOR = attackingColor == WHITE ? BLACK : WHITE;
-        int score = 0;
-        int8_t smallestAttackerSquare = getSmallestAttackerSquare<attackingColor>(square);
-
-        if (smallestAttackerSquare != NO_SQUARE) {
-            PieceType movingPiece = pieceSquareMapping[smallestAttackerSquare];
-            PieceType capturedPieceType = pieceSquareMapping[square];
-            int captureScore = mvvlva(movingPiece, capturedPieceType);
-            Move move{smallestAttackerSquare, square, movingPiece, captureScore};
-            makeMove(move);
-            score = std::max(0, getPieceWeight(capturedPieceType) - see<OPPOSITE_COLOR>(square));
-            unmakeMove(move);
-        }
-
-        return score;
-    }
-
-    // See, but after a move has already been made. We just check if the opponent can win material.
-    // This method is basically seeCapture where the move has already been made. It is used to analyze a move already made to see if it appears to be safe.
-    template <PieceColor movedColor>
-    int seeOpponent(int8_t square) {
-        // moved color is the color that just moved
-        constexpr PieceColor OPPOSITE_COLOR = movedColor == WHITE ? BLACK : WHITE;
-        int score = NO_CAPTURE_SCORE;
-        int8_t smallestAttackerSquare = getSmallestAttackerSquare<OPPOSITE_COLOR>(square);
-
-        if (smallestAttackerSquare != NO_SQUARE) {
-            PieceType movingPiece = pieceSquareMapping[smallestAttackerSquare];
-            PieceType capturedPieceType = pieceSquareMapping[square];
-            int captureScore = mvvlva(movingPiece, capturedPieceType);
-            Move move{smallestAttackerSquare, square, movingPiece, captureScore};
-            makeMove(move);
-            score = getPieceWeight(capturedPieceType) - see<OPPOSITE_COLOR>(square);
-            unmakeMove(move);
-        }
-
-        return score;
-    }
-
-    [[nodiscard]] const Move& getPreviousMove() const;
-
-    uint64_t getFile(int8_t square);
-
-    template <PieceColor color>
-    uint64_t getPawnsOnSameFile(int8_t square) {
-        return pieceBB[WHITE_PAWN + color] & getFile(square);
-    }
-
-    template <PieceColor color>
-    bool isIsolatedPawn(int8_t square) {
-        uint64_t neighborMask = 0;
-
-        if (square % 8 != 0) {
-            neighborMask |= getFile(square - 1);
-        }
-
-        if (square % 8 != 7) {
-            neighborMask |= getFile(square + 1);
-        }
-
-        if (color == WHITE) {
-            return !(neighborMask & getPieceBoard(WHITE_PAWN));
-        } else {
-            return !(neighborMask & getPieceBoard(BLACK_PAWN));
-        }
-    }
-
-    template <PieceColor color>
-    bool isPassedPawn(int8_t square) {
-        Direction direction = color == WHITE ? NORTH : SOUTH;
-        uint64_t neighborMask = getRayAttack(square, direction);
-        uint64_t pawnBB = getPieceBoard(color == WHITE ? WHITE_PAWN : BLACK_PAWN);
-
-        if (neighborMask & pawnBB) {
-            return false;
-        }
-
-        if (square % 8 != 0) {
-            // neighboring file
-            neighborMask |= getRayAttack(square - 1, direction);
-        }
-
-        if (square % 8 != 7) {
-            neighborMask |= getRayAttack(square + 1, direction);
-        }
-
-        if (color == WHITE) {
-            return !(neighborMask & getPieceBoard(BLACK_PAWN));
-        } else {
-            return !(neighborMask & getPieceBoard(WHITE_PAWN));
-        }
-    }
-
-    bool hasMinorOrMajorPieces();
-
-    template <PieceColor color>
-    bool hasMinorOrMajorPieces() {
-        if (color == WHITE) {
-            return getColorBoard<color>() & ~(
-                       getPieceBoard(WHITE_PAWN) | getPieceBoard(WHITE_KING));
-        } else {
-            return getColorBoard<color>() & ~(
-                       getPieceBoard(BLACK_PAWN) | getPieceBoard(BLACK_KING));
-        }
-    }
-
-    template <PieceColor color>
-    int getAmountOfMinorOrMajorPieces() {
-        if (color == WHITE) {
-            return popcnt(getColorBoard<color>() &
-                          ~(getPieceBoard(WHITE_PAWN) | getPieceBoard(WHITE_KING)));
-        } else {
-            return popcnt(getColorBoard<color>() &
-                          ~(getPieceBoard(BLACK_PAWN) | getPieceBoard(BLACK_KING)));
-        }
-    }
-
-    template <PieceColor color>
-    int getAmountOfPawns() {
-        return popcnt(getColorBoard<color>() & getPieceBoard(color == WHITE
-                                                                 ? WHITE_PAWN
-                                                                 : BLACK_PAWN));
-    }
-
-    template <PieceColor color>
-    int getAmountOfPieces() {
-        return popcnt(getColorBoard<color>());
-    }
-
-    void makeNullMove();
-
-    void unmakeNullMove();
-
-    [[nodiscard]] int getWhiteMidgamePst() const;
-
-    [[nodiscard]] int getWhiteEndgamePst() const;
-
-    [[nodiscard]] int getBlackMidgamePst() const;
-
-    [[nodiscard]] int getBlackEndgamePst() const;
-
-    int getAmountOfMinorOrMajorPieces();
-};
+    return static_cast<Square>(bitscanForward(bb));
+}
+
+/**
+ * \brief Gets a bitboard of all squares between two squares.
+ * \param fromSquare The starting square.
+ * \param toSquare The ending square.
+ *
+ * \return The bitboard of squares between the two squares.
+ */
+uint64_t getSquaresBetween(Square fromSquare, Square toSquare);
 } // namespace Zagreus
-
-#pragma clang diagnostic pop

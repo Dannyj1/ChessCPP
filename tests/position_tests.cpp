@@ -21,7 +21,6 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include "../src/board.h"
-#include "../src/eval.h"
 #include "../src/move_gen.h"
 #include "../src/move_picker.h"
 
@@ -77,4 +76,63 @@ const std::vector<std::string> POSITIONS = {
     "8/8/3P3k/8/1p6/8/1P6/1K3n2 b - - 0 1",
     "8/R7/2q5/8/6k1/8/1P5p/K6R w - - 0 124"
 };
+
+TEST_CASE("test_PieceBitBoards", "[types]") {
+    Board board{};
+    initZobristConstants();
+    initializeAttackLookupTables();
+
+    for (const std::string& fen : POSITIONS) {
+        board.setFromFEN(fen);
+
+        MoveList moves{};
+
+        if (board.getSideToMove() == WHITE) {
+            generateMoves<WHITE, ALL>(board, moves);
+        } else {
+            generateMoves<BLACK, ALL>(board, moves);
+        }
+
+        MovePicker picker{moves};
+        Move move;
+        std::string movingColorStr = board.getSideToMove() == WHITE ? "WHITE" : "BLACK";
+
+        while (picker.next(move)) {
+            board.makeMove(move);
+
+            uint64_t overlappingPieces;
+            uint64_t combinedPieces;
+
+            if (board.getSideToMove() == WHITE) {
+                overlappingPieces = board.getPieceBoard<WHITE_PAWN>() & board.getPieceBoard<WHITE_KNIGHT>() & board.getPieceBoard<WHITE_BISHOP>() &
+                                    board.getPieceBoard<WHITE_ROOK>() & board.getPieceBoard<WHITE_QUEEN>() & board.getPieceBoard<WHITE_KING>();
+                combinedPieces = board.getPieceBoard<WHITE_PAWN>() | board.getPieceBoard<WHITE_KNIGHT>() | board.getPieceBoard<WHITE_BISHOP>() |
+                                board.getPieceBoard<WHITE_ROOK>() | board.getPieceBoard<WHITE_QUEEN>() | board.getPieceBoard<WHITE_KING>();
+            } else {
+                overlappingPieces = board.getPieceBoard<BLACK_PAWN>() & board.getPieceBoard<BLACK_KNIGHT>() & board.getPieceBoard<BLACK_BISHOP>() &
+                                    board.getPieceBoard<BLACK_ROOK>() & board.getPieceBoard<BLACK_QUEEN>() & board.getPieceBoard<BLACK_KING>();
+                combinedPieces = board.getPieceBoard<BLACK_PAWN>() | board.getPieceBoard<BLACK_KNIGHT>() | board.getPieceBoard<BLACK_BISHOP>() |
+                                board.getPieceBoard<BLACK_ROOK>() | board.getPieceBoard<BLACK_QUEEN>() | board.getPieceBoard<BLACK_KING>();
+            }
+
+            REQUIRE(overlappingPieces == 0);
+            CAPTURE(fen, move, getMoveNotation(move), movingColorStr, overlappingPieces, combinedPieces);
+
+            if (board.getSideToMove() == WHITE) {
+                CAPTURE(board.getColorBitboard<WHITE>());
+                REQUIRE(combinedPieces == board.getColorBitboard<WHITE>());
+            } else {
+                CAPTURE(board.getColorBitboard<BLACK>());
+                REQUIRE(combinedPieces == board.getColorBitboard<BLACK>());
+            }
+
+            CAPTURE(board.getOccupiedBitboard(), board.getEmptyBitboard());
+            REQUIRE((combinedPieces & board.getOccupiedBitboard()) == combinedPieces);
+            REQUIRE((combinedPieces & board.getEmptyBitboard()) == 0);
+
+            board.unmakeMove();
+            REQUIRE(overlappingPieces == 0);
+        }
+    }
+}
 } // namespace Zagreus

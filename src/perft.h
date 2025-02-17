@@ -1,4 +1,3 @@
-
 /*
  This file is part of Zagreus.
 
@@ -20,16 +19,21 @@
  */
 
 #pragma once
-#ifdef ZAGREUS_TUNER
-#include <string>
+
+#include <cstdint>
+
+#include "board.h"
 
 namespace Zagreus {
-struct TunePosition {
-    std::string fen = "";
-    double result = 0.0;
-    int evalScore = 0;
-};
-
-void startTuning(std::string filePath);
-}
-#endif
+/**
+ * \brief Performs a perft test on the given board to a specified depth.
+ *
+ * This function recursively generates all possible moves up to a given depth and counts the number of nodes reached.
+ *
+ * \param board The board object on which to perform the perft.
+ * \param depth The depth to which moves should be generated.
+ * \param printNodes If true, prints the number of nodes for each move at the root level.
+ * \return The number of nodes reached.
+ */
+uint64_t perft(Board &board, int depth, bool printNodes = true);
+} // namespace Zagreus

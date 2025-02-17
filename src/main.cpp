@@ -2,7 +2,7 @@
  This file is part of Zagreus.
 
  Zagreus is a UCI chess engine
- Copyright (C) 2023  Danny Jelsma
+ Copyright (C) 2023-2025  Danny Jelsma
 
  Zagreus is free software: you can redistribute it and/or modify
  it under the terms of the GNU Affero General Public License as published
@@ -18,26 +18,22 @@
  along with Zagreus.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <fstream>
+#include <cstdint>
+#include <chrono>
+#include <exception>
 #include <iostream>
-#include <random>
+#include <ratio>
+#include <string>
 #include <vector>
 
-#include "../senjo/Output.h"
-#include "../senjo/UCIAdapter.h"
-#include "bitboard.h"
-#include "engine.h"
-#include "evaluate.h"
-#include "features.h"
-#include "magics.h"
-#include "pst.h"
+#include "board.h"
 #include "search.h"
 #include "tt.h"
 #include "tuner.h"
+#include "types.h"
+#include "uci.h"
 
 using namespace Zagreus;
-
-void benchmark(bool fast);
 
 // Some of these benchmark positions are taken from Stockfish's benchmark.cpp:
 // https://github.com/official-stockfish/Stockfish/blob/master/src/benchmark.cpp
@@ -92,7 +88,6 @@ const std::vector<std::string> BENCHMARK_POSITIONS = {
     "8/R7/2q5/8/6k1/8/1P5p/K6R w - - 0 124"
 };
 
-// So valgrind doesn't take ages...
 const std::vector<std::string> FAST_BENCHMARK_POSITIONS = {
     "8/3k4/8/8/8/4B3/4KB2/2B5 w - - 0 1",
     "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 10",
@@ -108,139 +103,89 @@ const std::vector<std::string> FAST_BENCHMARK_POSITIONS = {
     "8/R7/2q5/8/6k1/8/1P5p/K6R w - - 0 124"
 };
 
-int main(int argc, char* argv[]) {
-    initializeBitboardConstants();
-    initializeSearch();
-    initializeMagicBitboards();
-    initializePst();
+void benchmark(bool fast);
 
-    senjo::Output(senjo::Output::NoPrefix) << "Zagreus  Copyright (C) 2023  Danny Jelsma";
-    senjo::Output(senjo::Output::NoPrefix) << "";
-    senjo::Output(senjo::Output::NoPrefix) << "This program comes with ABSOLUTELY NO WARRANTY.";
-    senjo::Output(senjo::Output::NoPrefix)
-        << "This is free software, and you are welcome to redistribute it";
-    senjo::Output(senjo::Output::NoPrefix)
-        << "under the conditions of the GNU Affero General Public License v3.0 or later.";
-    senjo::Output(senjo::Output::NoPrefix)
-        << "You should have received a copy of the GNU Affero General Public License";
-    senjo::Output(senjo::Output::NoPrefix)
-        << "along with this program. If not, see <https://www.gnu.org/licenses/>.";
-    senjo::Output(senjo::Output::NoPrefix) << "";
-    senjo::Output(senjo::Output::NoPrefix) << " ______ ";
-    senjo::Output(senjo::Output::NoPrefix) << " |___  / ";
-    senjo::Output(senjo::Output::NoPrefix) << "    / /  __ _   __ _  _ __  ___  _   _  ___ ";
-    senjo::Output(senjo::Output::NoPrefix) << "   / /  / _` | / _` || '__|/ _ \\| | | |/ __|";
-    senjo::Output(senjo::Output::NoPrefix) << "  / /__| (_| || (_| || |  |  __/| |_| |\\__ \\";
-    senjo::Output(senjo::Output::NoPrefix) << R"( /_____|\__,_| \__, ||_|   \___| \__,_||___/)";
-    senjo::Output(senjo::Output::NoPrefix) << "                __/ | ";
-    senjo::Output(senjo::Output::NoPrefix) << "               |___/ ";
-    senjo::Output(senjo::Output::NoPrefix) << "";
-
-    std::string majorVersion = ZAGREUS_VERSION_MAJOR;
-    std::string minorVersion = ZAGREUS_VERSION_MINOR;
-    std::string versionString = "v" + majorVersion + "." + minorVersion;
-
-    if (majorVersion == "dev") {
-        versionString = majorVersion + "-" + minorVersion;
-    }
-
-    senjo::Output(senjo::Output::NoPrefix) << "Zagreus UCI chess engine " << versionString
-        << " by Danny Jelsma (https://github.com/Dannyj1/Zagreus)";
-
-    if (argc >= 2) {
-        if (strcmp(argv[1], "bench") == 0) {
-            senjo::Output(senjo::Output::NoPrefix) << "Starting benchmark...";
-
-            benchmark(false);
-            return 0;
-        } else if (strcmp(argv[1], "fastbench") == 0) {
-            senjo::Output(senjo::Output::NoPrefix) << "Starting fast benchmark...";
-
-            benchmark(true);
-            return 0;
-        } else if (strcmp(argv[1], "tune") == 0) {
-            startTuning(argv[2]);
-            return 0;
-        } else if (strcmp(argv[1], "printeval") == 0) {
-            printEvalValues();
+int main(const int argc, char* argv[]) {
+    if (argc > 1) {
+        if (std::string(argv[1]) == "bench") {
+            const bool fast = argc > 2 && std::string(argv[2]) == "fast";
+            benchmark(fast);
             return 0;
         }
 
-        senjo::Output(senjo::Output::NoPrefix) << "Unknown argument!";
-        return 0;
+#ifdef ZAGREUS_TUNER
+        if (std::string(argv[1]) == "tune") {
+            const std::string filePath = argc > 2 ? std::string(argv[2]) : "";
+
+            if (filePath.empty()) {
+                std::cerr << "No file path provided for tuning" << std::endl;
+                return 1;
+            }
+
+            startTuning(filePath);
+            return 0;
+        }
+#endif
     }
 
     try {
-        ZagreusEngine engine;
-        senjo::UCIAdapter adapter(engine);
-
-        std::string line;
-        line.reserve(16384);
-
-        while (std::getline(std::cin, line)) {
-            try {
-                if (!adapter.doCommand(line)) {
-                    break;
-                }
-            } catch (const std::exception& e) {
-                senjo::Output(senjo::Output::NoPrefix) << "ERROR: " << e.what();
-                return -1;
-            }
-        }
-
-        return 0;
+        Engine engine;
+        engine.startUci();
     } catch (const std::exception& e) {
-        senjo::Output(senjo::Output::NoPrefix) << "ERROR: " << e.what();
+        // Handle the exception or log the error
+        std::cerr << "An error occurred: " << e.what() << std::endl;
         return 1;
     }
+
+    return 0;
 }
 
 void benchmark(bool fast) {
-    ZagreusEngine engine;
-    senjo::UCIAdapter adapter(engine);
+    Engine engine{};
     uint64_t nodes = 0;
     double totalMs = 0;
-    Bitboard bb{};
+    Board board{};
 
-    engine.initialize();
-    TranspositionTable::getTT()->setTableSize(512);
+    engine.registerOptions();
+    engine.doSetup();
+    TranspositionTable::getTT()->setTableSize(128);
     std::vector<std::string> positions = fast ? FAST_BENCHMARK_POSITIONS : BENCHMARK_POSITIONS;
+    SearchParams params{};
+
+    params.depth = fast ? 4 : 8;
 
     for (const std::string& position : positions) {
         for (int i = 0; i < 2; i++) {
             TranspositionTable::getTT()->reset();
-            PieceColor color = i == 0 ? WHITE : BLACK;
+            const PieceColor color = i == 0 ? WHITE : BLACK;
 
-            bb.setFromFen(position);
-            bb.setMovingColor(color);
-
-            senjo::GoParams params{};
-            senjo::SearchStats searchStats{};
-            params.depth = fast ? 5 : 6;
-
+            board.setFromFEN(position);
+            board.setSideToMove(color);
+            SearchStats stats{};
             auto start = std::chrono::steady_clock::now();
 
             if (color == WHITE) {
-                getBestMove<WHITE>(params, engine, bb, searchStats);
+                search<WHITE>(engine, board, params, stats);
             } else {
-                getBestMove<BLACK>(params, engine, bb, searchStats);
+                search<BLACK>(engine, board, params, stats);
             }
 
             auto end = std::chrono::steady_clock::now();
             std::chrono::duration<double, std::milli> elapsed = end - start;
 
-            nodes += searchStats.nodes + searchStats.qnodes;
+            nodes += stats.nodesSearched + stats.qNodesSearched;
             totalMs += elapsed.count();
         }
     }
 
     if (nodes == 0 || totalMs == 0) {
-        senjo::Output(senjo::Output::NoPrefix) << "0 nodes 0 nps";
+        engine.sendMessage("0 nodes 0 nps");
         return;
     }
 
-    double secondsSpent = totalMs / 1000.0;
-    auto nodesPerSecond = static_cast<uint64_t>(static_cast<double>(nodes) / secondsSpent);
+    const double secondsSpent = totalMs / 1000.0;
+    const uint64_t nodesPerSecond = static_cast<uint64_t>(static_cast<double>(nodes) / secondsSpent);
+    std::string message = std::to_string(nodes) + " nodes " + std::to_string(nodesPerSecond) + " nps";
 
-    senjo::Output(senjo::Output::NoPrefix) << nodes << " nodes " << nodesPerSecond << " nps";
+    engine.sendMessage(message);
 }

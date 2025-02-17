@@ -1,4 +1,3 @@
-
 /*
  This file is part of Zagreus.
 
@@ -19,17 +18,18 @@
  along with Zagreus.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#pragma once
-#ifdef ZAGREUS_TUNER
-#include <string>
+#include "eval_features.h"
+
+#include <vector>
 
 namespace Zagreus {
-struct TunePosition {
-    std::string fen = "";
-    double result = 0.0;
-    int evalScore = 0;
+int evalMaterialValues[GAME_PHASES][PIECE_TYPES]{
+    {100, 350, 350, 525, 1000}, // Midgame
+    {100, 350, 350, 525, 1000} // Endgame
 };
 
-void startTuning(std::string filePath);
-}
-#endif
+int evalMobility[GAME_PHASES][PIECE_TYPES]{
+    {0, 4, 6, 2, 4, 0},
+    {0, 2, 3, 5, 6, 0}
+};
+} // namespace Zagreus
